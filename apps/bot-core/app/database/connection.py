@@ -105,3 +105,6 @@ class Database:
         if self._conn:
             self._conn.close()
             self._conn = None
+
+    def utcnow(self) -> str:
+        return datetime.now(timezone.utc).isoformat(timespec="seconds")

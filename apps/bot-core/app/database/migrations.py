@@ -184,10 +184,11 @@ ENGAGEMENT_PROVIDER_SERVICES = [
 
 def init_database(db: Database) -> None:
     """Initialize database schema and seed data."""
+    # Execute schema (outside transaction - executescript commits implicitly in autocommit mode)
+    db.executescript(SCHEMA_SQL)
+    
+    # Seed data (inside transaction)
     with db.transaction():
-        # Execute schema
-        db.executescript(SCHEMA_SQL)
-        
         # Seed services catalog
         for title, desc, platform in CATALOG:
             db.execute(
