@@ -137,9 +137,119 @@ class FlowTests(unittest.TestCase):
         self.app = App()
         self.app.api = StubTelegram()
         self.app.username = "test_bot"
+        # Run engagement migration for test database
+        self._run_engagement_migration()
         # Mock the provider API
         self.mock_provider = MockVietnamFB()
         self.app.provider = self.mock_provider
+
+    def _run_engagement_migration(self):
+        """Run engagement migration on test database."""
+        with self.app.db.transaction():
+            # Platform table
+            self.app.db.conn.execute("""
+                CREATE TABLE IF NOT EXISTS engagement_platforms (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    slug TEXT NOT NULL UNIQUE,
+                    name TEXT NOT NULL,
+                    name_en TEXT NOT NULL DEFAULT '',
+                    enabled INTEGER NOT NULL DEFAULT 1,
+                    sort_order INTEGER NOT NULL DEFAULT 0,
+                    icon TEXT NOT NULL DEFAULT '',
+                    created_at TEXT NOT NULL DEFAULT (datetime('now'))
+                )
+            """)
+            # Service Category table
+            self.app.db.conn.execute("""
+                CREATE TABLE IF NOT EXISTS engagement_categories (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    platform_id INTEGER NOT NULL REFERENCES engagement_platforms(id),
+                    slug TEXT NOT NULL,
+                    name TEXT NOT NULL,
+                    name_en TEXT NOT NULL DEFAULT '',
+                    enabled INTEGER NOT NULL DEFAULT 1,
+                    sort_order INTEGER NOT NULL DEFAULT 0,
+                    provider_category_id TEXT NOT NULL DEFAULT '',
+                    service_type TEXT NOT NULL DEFAULT 'member',
+                    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+                    UNIQUE(platform_id, slug)
+                )
+            """)
+            # Provider Service mapping table
+            self.app.db.conn.execute("""
+                CREATE TABLE IF NOT EXISTS engagement_provider_services (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    category_id INTEGER NOT NULL REFERENCES engagement_categories(id),
+                    provider_id TEXT NOT NULL DEFAULT 'vietnamfb',
+                    provider_service_id TEXT NOT NULL,
+                    name TEXT NOT NULL,
+                    min_quantity INTEGER NOT NULL DEFAULT 1,
+                    max_quantity INTEGER NOT NULL DEFAULT 1000000,
+                    rate_milli INTEGER NOT NULL DEFAULT 0,
+                    status TEXT NOT NULL DEFAULT 'active',
+                    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+                    UNIQUE(provider_id, provider_service_id)
+                )
+            """)
+            # Indexes
+            self.app.db.conn.execute("""
+                CREATE INDEX IF NOT EXISTS idx_engagement_categories_platform 
+                ON engagement_categories(platform_id)
+            """)
+            self.app.db.conn.execute("""
+                CREATE INDEX IF NOT EXISTS idx_engagement_provider_services_category 
+                ON engagement_provider_services(category_id)
+            """)
+            # Insert default platforms
+            platforms = [
+                ("telegram", "Telegram", "Telegram", 1, 1, "📱"),
+                ("youtube", "YouTube", "YouTube", 0, 2, "📺"),
+                ("twitter", "Twitter (X)", "Twitter (X)", 0, 3, "🐦"),
+                ("facebook", "Facebook", "Facebook", 0, 4, "📘"),
+                ("instagram", "Instagram", "Instagram", 0, 5, "📷"),
+                ("shopee", "Shopee", "Shopee", 0, 6, "🛍️"),
+            ]
+            for slug, name, name_en, enabled, sort_order, icon in platforms:
+                self.app.db.conn.execute("""
+                    INSERT OR IGNORE INTO engagement_platforms(slug, name, name_en, enabled, sort_order, icon)
+                    VALUES (?, ?, ?, ?, ?, ?)
+                """, (slug, name, name_en, enabled, sort_order, icon))
+            # Insert Telegram categories
+            telegram_platform = self.app.db.conn.execute(
+                "SELECT id FROM engagement_platforms WHERE slug=?", ("telegram",)
+            ).fetchone()
+            if telegram_platform:
+                platform_id = telegram_platform["id"]
+                categories = [
+                    (platform_id, "members", "Member Telegram", "Member Telegram", 1, 1, "18", "member"),
+                    (platform_id, "views", "View Telegram", "View Telegram", 0, 2, "", "view"),
+                ]
+                for pid, slug, name, name_en, enabled, sort_order, provider_cat_id, svc_type in categories:
+                    self.app.db.conn.execute("""
+                        INSERT OR IGNORE INTO engagement_categories(
+                            platform_id, slug, name, name_en, enabled, sort_order, 
+                            provider_category_id, service_type
+                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    """, (pid, slug, name, name_en, enabled, sort_order, provider_cat_id, svc_type))
+                # Insert default provider services for Telegram Members
+                members_category = self.app.db.conn.execute(
+                    "SELECT id FROM engagement_categories WHERE platform_id=? AND slug=?", 
+                    (platform_id, "members")
+                ).fetchone()
+                if members_category:
+                    cat_id = members_category["id"]
+                    provider_services = [
+                        (cat_id, "vietnamfb", "1720", "Telegram Members HQ", 10, 1000000, 40686, "active"),
+                        (cat_id, "vietnamfb", "1510", "Telegram Members PLUS", 10, 1000000, 47664, "active"),
+                        (cat_id, "vietnamfb", "1694", "Telegram Premium Members", 1, 500000, 142330, "active"),
+                    ]
+                    for cat_id, provider_id, provider_svc_id, name, min_qty, max_qty, rate, status in provider_services:
+                        self.app.db.conn.execute("""
+                            INSERT OR IGNORE INTO engagement_provider_services(
+                                category_id, provider_id, provider_service_id, name, 
+                                min_quantity, max_quantity, rate_milli, status
+                            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                        """, (cat_id, provider_id, provider_svc_id, name, min_qty, max_qty, rate, status))
 
     def tearDown(self):
         self.app.db.close()
@@ -211,11 +321,30 @@ class FlowTests(unittest.TestCase):
         self.cb(111, "tools")
         self.app.api.calls.clear()
         self.cb(111, "tools:engagement")
-        self.assertEqual(self.buttons(), ["engagement:telegram_members", "tools"])
+        # Check platform grid - 6 platforms in 2 columns + back button
+        buttons = self.buttons()
+        self.assertIn("engagement:platform:telegram", buttons)
+        self.assertIn("engagement:coming_soon:youtube", buttons)
+        self.assertIn("engagement:coming_soon:twitter", buttons)
+        self.assertIn("engagement:coming_soon:facebook", buttons)
+        self.assertIn("engagement:coming_soon:instagram", buttons)
+        self.assertIn("engagement:coming_soon:shopee", buttons)
+        self.assertIn("tools", buttons)
         self.assertIn("Engagement Services", self.app.api.calls[-1][2])
 
+        # Click on Telegram platform
         self.app.api.calls.clear()
-        self.cb(111, "engagement:telegram_members")
+        self.cb(111, "engagement:platform:telegram")
+        buttons = self.buttons()
+        # Should show categories: Member Telegram (enabled) + back button
+        # View Telegram is disabled by default
+        self.assertTrue(any(b.startswith("engagement:category:") for b in buttons))
+        self.assertIn("tools:engagement", buttons)
+
+        # Click on Member Telegram category
+        self.app.api.calls.clear()
+        members_cat_callback = [b for b in buttons if b.startswith("engagement:category:")][0]
+        self.cb(111, members_cat_callback)
         texts = [c[2] for c in self.app.api.calls if c[0] == "sendMessage"]
         self.assertTrue(texts)
         text = texts[-1]
@@ -227,7 +356,7 @@ class FlowTests(unittest.TestCase):
         self.assertIn("tg_member_select:1720", buttons)
         self.assertIn("tg_member_select:1510", buttons)
         self.assertIn("tg_member_select:1694", buttons)
-        self.assertIn("tools:engagement", buttons)
+        self.assertIn("engagement:platform:telegram", buttons)
 
         self.app.api.calls.clear()
         self.cb(111, "tools")

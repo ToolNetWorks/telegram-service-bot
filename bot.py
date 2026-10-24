@@ -42,6 +42,15 @@ TOOLS_GIF = BASE_DIR / "assets" / "gifs" / "tools.gif"
 ENGAGEMENT_GIF = BASE_DIR / "assets" / "gifs" / "engagement.gif"
 PLATFORMS = {"telegram": "Telegram", "tiktok": "TikTok", "youtube": "YouTube",
              "facebook": "Facebook", "instagram": "Instagram"}
+# Engagement platforms (for the new menu structure)
+ENGAGEMENT_PLATFORMS = [
+    ("telegram", "Telegram", "📱"),
+    ("youtube", "YouTube", "📺"),
+    ("twitter", "Twitter (X)", "🐦"),
+    ("facebook", "Facebook", "📘"),
+    ("instagram", "Instagram", "📷"),
+    ("shopee", "Shopee", "🛍️"),
+]
 TARGET_TYPES = {
     "telegram": ("profile", "channel", "group", "post"),
     "tiktok": ("profile", "post"), "youtube": ("profile", "channel", "post"),
@@ -322,16 +331,86 @@ class App:
         self.deliver(uid, text, markup)
 
     def engagement_menu(self, uid):
+        """Display engagement platforms in a 2-column grid."""
         text = self.t(uid, "engagement_menu")
-        markup = keyboard(
-            ((self.t(uid, "member_telegram"), "engagement:telegram_members"),),
-            ((self.t(uid, "back_tools"), "tools"),),
-        )
+        language = self.lang(uid)
+        
+        # Build 2-column keyboard from ENGAGEMENT_PLATFORMS
+        rows = []
+        for i in range(0, len(ENGAGEMENT_PLATFORMS), 2):
+            row = []
+            slug1, name1, icon1 = ENGAGEMENT_PLATFORMS[i]
+            # Check if platform is enabled in database
+            platform1 = self.db.get_engagement_platform_by_slug(slug1)
+            if platform1 and platform1["enabled"]:
+                label1 = f"{icon1} {self.t(uid, f'engagement_{slug1}')}"
+                row.append((label1, f"engagement:platform:{slug1}"))
+            else:
+                label1 = f"{icon1} {self.t(uid, f'engagement_{slug1}')} {self.t(uid, 'engagement_coming_soon')}"
+                row.append((label1, f"engagement:coming_soon:{slug1}"))
+            
+            if i + 1 < len(ENGAGEMENT_PLATFORMS):
+                slug2, name2, icon2 = ENGAGEMENT_PLATFORMS[i + 1]
+                platform2 = self.db.get_engagement_platform_by_slug(slug2)
+                if platform2 and platform2["enabled"]:
+                    label2 = f"{icon2} {self.t(uid, f'engagement_{slug2}')}"
+                    row.append((label2, f"engagement:platform:{slug2}"))
+                else:
+                    label2 = f"{icon2} {self.t(uid, f'engagement_{slug2}')} {self.t(uid, 'engagement_coming_soon')}"
+                    row.append((label2, f"engagement:coming_soon:{slug2}"))
+            rows.append(tuple(row))
+        
+        # Back button
+        rows.append(((self.t(uid, "back_tools"), "tools"),))
+        
+        markup = keyboard(*rows)
         if self.send_default_animation(uid, text, markup, image_name="engagement"):
             return
         self.deliver(uid, text, markup)
 
+    def engagement_platform(self, uid, platform_slug: str):
+        """Display service categories for a platform."""
+        platform = self.db.get_engagement_platform_by_slug(platform_slug)
+        if not platform:
+            return self.deliver(uid, "Platform not found.", keyboard(((self.t(uid, "back_tools"), "tools"),)))
+        
+        if not platform["enabled"]:
+            return self.deliver(uid, self.t(uid, "engagement_coming_soon"), 
+                                keyboard(((self.t(uid, "back_engagement"), "tools:engagement"),)))
+        
+        categories = self.db.list_engagement_categories(platform["id"])
+        if not categories:
+            return self.deliver(uid, self.t(uid, "engagement_no_services"),
+                                keyboard(((self.t(uid, "back_engagement"), "tools:engagement"),)))
+        
+        text = self.t(uid, "engagement_select_category")
+        rows = []
+        for i in range(0, len(categories), 2):
+            row = []
+            cat1 = categories[i]
+            label1 = self.t(uid, f'{cat1["slug"]}') if cat1["slug"] in ("members", "views") else cat1["name"]
+            # Use translation key if available
+            if cat1["slug"] == "members":
+                label1 = self.t(uid, "telegram_members")
+            elif cat1["slug"] == "views":
+                label1 = self.t(uid, "telegram_views")
+            row.append((label1, f"engagement:category:{cat1['id']}"))
+            
+            if i + 1 < len(categories):
+                cat2 = categories[i + 1]
+                label2 = self.t(uid, f'{cat2["slug"]}') if cat2["slug"] in ("members", "views") else cat2["name"]
+                if cat2["slug"] == "members":
+                    label2 = self.t(uid, "telegram_members")
+                elif cat2["slug"] == "views":
+                    label2 = self.t(uid, "telegram_views")
+                row.append((label2, f"engagement:category:{cat2['id']}"))
+            rows.append(tuple(row))
+        
+        rows.append(((self.t(uid, "back_engagement"), "tools:engagement"),))
+        self.deliver(uid, text, keyboard(*rows))
+
     def telegram_members(self, uid):
+        """Show Telegram Member packages from provider API (existing functionality)."""
         if not self.provider:
             return self.deliver(uid, "Provider API not configured.", self.back(uid))
         try:
@@ -389,17 +468,41 @@ class App:
                 markup_rows.append((rows[i][0], rows[i+1][0]))
             else:
                 markup_rows.append(rows[i])
-        markup_rows.append(((self.t(uid, "back_engagement"), "tools:engagement"),))
+        markup_rows.append(((self.t(uid, "back_telegram"), "engagement:platform:telegram"),))
         self.deliver(uid, text, keyboard(*markup_rows))
+
+    def telegram_views(self, uid):
+        """Show Telegram Views services. Currently unavailable - placeholder."""
+        # Check if there are any provider services for views category
+        platform = self.db.get_engagement_platform_by_slug("telegram")
+        if not platform:
+            return self.deliver(uid, self.t(uid, "telegram_views_unavailable"),
+                                keyboard(((self.t(uid, "back_telegram"), "engagement:platform:telegram"),)))
+        
+        views_category = self.db.get_engagement_category_by_slug(platform["id"], "views")
+        if not views_category or not views_category["enabled"]:
+            return self.deliver(uid, self.t(uid, "telegram_views_unavailable"),
+                                keyboard(((self.t(uid, "back_telegram"), "engagement:platform:telegram"),)))
+        
+        # Check if there are active provider services
+        provider_services = self.db.list_engagement_provider_services(views_category["id"])
+        if not provider_services:
+            return self.deliver(uid, self.t(uid, "telegram_views_no_provider"),
+                                keyboard(((self.t(uid, "back_telegram"), "engagement:platform:telegram"),)))
+        
+        # TODO: Implement views ordering flow when provider services are available
+        # For now, show unavailable message
+        self.deliver(uid, self.t(uid, "telegram_views_unavailable"),
+                     keyboard(((self.t(uid, "back_telegram"), "engagement:platform:telegram"),)))
 
     def tg_member_start_order(self, uid, service_id):
         """Bắt đầu quy trình đặt hàng: nhập link group."""
         svc = self.provider.get_service(service_id)
         if not svc:
-            return self.deliver(uid, "Dịch vụ không tồn tại.", keyboard(((self.t(uid, "back_engagement"), "tools:engagement"),)))
+            return self.deliver(uid, "Dịch vụ không tồn tại.", keyboard(((self.t(uid, "back_telegram"), "engagement:platform:telegram"),)))
         self.db.set_state(uid, "tg_member_link", service_id=service_id, min_qty=svc.min_quantity, max_qty=svc.max_quantity)
         self.deliver(uid, self.t(uid, "tg_member_enter_link"),
-                     keyboard(((self.t(uid, "cancel"), "tools:engagement"),)))
+                     keyboard(((self.t(uid, "cancel"), "engagement:platform:telegram"),)))
 
     def tg_member_confirm_pay(self, uid):
         """Xác nhận thanh toán và đặt đơn provider với các lớp chống trùng.
@@ -416,19 +519,19 @@ class App:
         except Exception:
             LOG.exception("Không đọc được trạng thái đặt đơn uid=%s", uid)
             return self.deliver(uid, self.t(uid, "tg_member_db_busy"),
-                                keyboard(((self.t(uid, "back_engagement"), "tools:engagement"),)))
+                                keyboard(((self.t(uid, "back_telegram"), "engagement:platform:telegram"),)))
         if state != "tg_member_confirm" or "service_id" not in data:
             return self.deliver(uid, "Phiên đặt hàng không hợp lệ.",
-                                keyboard(((self.t(uid, "back_engagement"), "tools:engagement"),)))
+                                keyboard(((self.t(uid, "back_telegram"), "engagement:platform:telegram"),)))
         try:
             claimed = self.db.claim_state(uid, "tg_member_confirm")
         except Exception:
             LOG.exception("Không claim được state đặt đơn uid=%s", uid)
             return self.deliver(uid, self.t(uid, "tg_member_db_busy"),
-                                keyboard(((self.t(uid, "back_engagement"), "tools:engagement"),)))
+                                keyboard(((self.t(uid, "back_telegram"), "engagement:platform:telegram"),)))
         if not claimed:
             return self.deliver(uid, self.t(uid, "tg_member_duplicate"),
-                                keyboard(((self.t(uid, "back_engagement"), "tools:engagement"),)))
+                                keyboard(((self.t(uid, "back_telegram"), "engagement:platform:telegram"),)))
         try:
             self._place_tg_member_order(uid, data)
         except Exception:
@@ -446,13 +549,13 @@ class App:
         if not self.provider:
             self.db.set_state(uid, "")
             return self.deliver(uid, self.t(uid, "tg_member_unavailable"),
-                                keyboard(((self.t(uid, "back_engagement"), "tools:engagement"),)))
+                                keyboard(((self.t(uid, "back_telegram"), "engagement:platform:telegram"),)))
         svc = self.provider.get_service(data.get("service_id", ""))
         tool_service = self.db.get_service_by_title("Tool Access")
         if not svc or not tool_service:
             self.db.set_state(uid, "")
             return self.deliver(uid, self.t(uid, "tg_member_unavailable"),
-                                keyboard(((self.t(uid, "back_engagement"), "tools:engagement"),)))
+                                keyboard(((self.t(uid, "back_telegram"), "engagement:platform:telegram"),)))
         try:
             quantity = int(data["quantity"])
             total = int(data["total"])
@@ -463,11 +566,11 @@ class App:
         except (KeyError, TypeError, ValueError):
             self.db.set_state(uid, "")
             return self.deliver(uid, "Phiên đặt hàng không hợp lệ.",
-                                keyboard(((self.t(uid, "back_engagement"), "tools:engagement"),)))
+                                keyboard(((self.t(uid, "back_telegram"), "engagement:platform:telegram"),)))
         if total <= 0 or quantity <= 0 or not link:
             self.db.set_state(uid, "")
             return self.deliver(uid, "Phiên đặt hàng không hợp lệ.",
-                                keyboard(((self.t(uid, "back_engagement"), "tools:engagement"),)))
+                                keyboard(((self.t(uid, "back_telegram"), "engagement:platform:telegram"),)))
 
         request_key = f"tgprov:{data.get('nonce') or secrets.token_hex(8)}"
         try:
@@ -493,16 +596,16 @@ class App:
             outcome, order = "ok", recovered
         if outcome == "duplicate":
             return self.deliver(uid, self.t(uid, "tg_member_duplicate"),
-                                keyboard(((self.t(uid, "back_engagement"), "tools:engagement"),)))
+                                keyboard(((self.t(uid, "back_telegram"), "engagement:platform:telegram"),)))
         if outcome == "insufficient":
             balance = self.db.get_user(uid)["balance"]
             return self.deliver(uid, self.t(uid, "tg_member_insufficient_balance",
                                                need=total, have=balance),
-                                keyboard(((self.t(uid, "cancel"), "tools:engagement"),)))
+                                keyboard(((self.t(uid, "cancel"), "engagement:platform:telegram"),)))
         if outcome != "ok" or not order:
             self.db.set_state(uid, "")
             return self.deliver(uid, "Phiên đặt hàng không hợp lệ.",
-                                keyboard(((self.t(uid, "back_engagement"), "tools:engagement"),)))
+                                keyboard(((self.t(uid, "back_telegram"), "engagement:platform:telegram"),)))
 
         self.deliver(uid, self.t(uid, "tg_member_placing"))
 
@@ -559,7 +662,7 @@ class App:
                 link=link,
                 quantity=quantity,
                 total=total),
-                keyboard(((self.t(uid, "back_engagement"), "tools:engagement"),)))
+                keyboard(((self.t(uid, "back_telegram"), "engagement:platform:telegram"),)))
             return
 
         # Provider already accepted the order but the DB write failed: never
@@ -591,7 +694,7 @@ class App:
                 LOG.exception("Không xoá được state uid=%s", uid)
             if refunded is not None:
                 self.deliver(uid, self.t(uid, "tg_member_failed", error=esc(str(exc))[:300]),
-                             keyboard(((self.t(uid, "back_engagement"), "tools:engagement"),)))
+                             keyboard(((self.t(uid, "back_telegram"), "engagement:platform:telegram"),)))
                 self.admins_notify(
                     f"Đơn provider <b>#{order['id']}</b> bị từ chối, đã hoàn "
                     f"<b>{money(int(order['amount']))}</b> cho user <code>{uid}</code>.\n"
@@ -599,7 +702,7 @@ class App:
                 )
             else:
                 self.deliver(uid, self.t(uid, "tg_member_duplicate"),
-                             keyboard(((self.t(uid, "back_engagement"), "tools:engagement"),)))
+                             keyboard(((self.t(uid, "back_telegram"), "engagement:platform:telegram"),)))
             return
         self._provider_pending(uid, order, data, svc, str(exc))
 
@@ -614,7 +717,7 @@ class App:
         except Exception:
             LOG.exception("Không xoá được state uid=%s", uid)
         self.deliver(uid, self.t(uid, "tg_member_pending_reconcile", order_id=order["id"]),
-                     keyboard(((self.t(uid, "back_engagement"), "tools:engagement"),)))
+                     keyboard(((self.t(uid, "back_telegram"), "engagement:platform:telegram"),)))
         link = str(data.get("link", ""))
         quantity = data.get("quantity", 0)
         self.admins_notify(
@@ -1247,6 +1350,33 @@ class App:
         if action == "tools:engagement":
             self.db.set_state(uid, "")
             return self.engagement_menu(uid)
+        # New engagement platform/category callbacks
+        if action.startswith("engagement:platform:"):
+            self.db.set_state(uid, "")
+            platform_slug = action.split(":", 2)[2]
+            return self.engagement_platform(uid, platform_slug)
+        if action.startswith("engagement:category:"):
+            self.db.set_state(uid, "")
+            try:
+                category_id = int(action.split(":", 2)[2])
+            except ValueError:
+                return self.deliver(uid, "Invalid category.", self.back(uid))
+            category = self.db.get_engagement_category(category_id)
+            if not category:
+                return self.deliver(uid, "Category not found.", self.back(uid))
+            # Route to appropriate handler based on category slug
+            if category["slug"] == "members":
+                return self.telegram_members(uid)
+            elif category["slug"] == "views":
+                return self.telegram_views(uid)
+            else:
+                return self.deliver(uid, "Service not available.", 
+                                    keyboard(((self.t(uid, "back_engagement"), "tools:engagement"),)))
+        if action.startswith("engagement:coming_soon:"):
+            self.db.set_state(uid, "")
+            return self.deliver(uid, self.t(uid, "engagement_coming_soon"),
+                                keyboard(((self.t(uid, "back_engagement"), "tools:engagement"),)))
+        # Backward compatibility: old callback for telegram members
         if action == "engagement:telegram_members":
             self.db.set_state(uid, "")
             return self.telegram_members(uid)
