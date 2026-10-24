@@ -1,0 +1,61 @@
+# .dockerignore - Exclude from Docker build context
+# Secrets and environment
+.env
+.env.local
+.env.*.local
+
+# Data and databases (use persistent volume)
+data/
+*.sqlite3
+*.sqlite3-*
+*.db
+
+# Logs
+logs/
+*.log
+
+# Backups
+backups/
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.pytest_cache/
+.coverage
+*.cover
+
+# Testing
+htmlcov/
+.tox/
+.mypy_cache/
+*.egg-info/
+
+# IDE/Editor
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Git
+.git/
+.gitignore
+
+# Documentation
+*.md
+!README.md
+
+# Docker
+Dockerfile*
+docker-compose*
+.dockerignore
+
+# CI/CD
+.github/
+.gitlab-ci.yml
