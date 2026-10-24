@@ -1,0 +1,2 @@
+# ToolNet Bot Core dependencies
+# Only stdlib used - no external dependencies required
