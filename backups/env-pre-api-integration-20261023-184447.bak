@@ -1,0 +1,14 @@
+# Tạo bot qua @BotFather; tuyệt đối không commit BOT_TOKEN
+BOT_TOKEN=8787606779:AAE9idKlZ-DvbMqhj4uTpZxCKFfdVHX1ZLo
+ADMIN_IDS=1208342332
+BOT_NAME=ToolNet
+SUPPORT_USERNAME=
+DB_PATH=./data/bot.sqlite3
+LOG_LEVEL=INFO
+# Chỉ mở nạp tiền nếu cả 3 trường sau được thiết lập
+BANK_NAME=
+BANK_ACCOUNT=
+BANK_OWNER=
+# VietnamFB SMM Panel API
+VIETNAMFB_API_KEY=f3a36a51caf98be589b1a2cba89c52340e8251474b2d3fe2d430cd918217dca9fa6d11779a14750fd69386695cdbc024c80b7dafc7a6008e68fb04fdd04cbcfb
+VIETNAMFB_BASE_URL=https://vietnamfb.com
