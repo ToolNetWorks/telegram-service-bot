@@ -59,10 +59,16 @@ class BalanceInfo:
 
 
 class VietnamFBError(Exception):
-    """Lỗi từ API VietnamFB."""
-    def __init__(self, message: str, code: Optional[int] = None):
+    """Lỗi từ API VietnamFB.
+
+    ``definitive`` is True only when the provider certainly did not accept the
+    order (so a wallet refund is safe).  Network/timeout/invalid-response
+    errors are ambiguous and must be reconciled instead of refunded blindly.
+    """
+    def __init__(self, message: str, code: Optional[int] = None, definitive: bool = True):
         super().__init__(message)
         self.code = code
+        self.definitive = definitive
 
 
 class VietnamFBAPI:
@@ -99,13 +105,15 @@ class VietnamFBAPI:
         except urllib.error.HTTPError as e:
             body = e.read().decode("utf-8", errors="ignore")
             LOG.error("API %s HTTP %s: %s", site, e.code, body[:200])
-            raise VietnamFBError(f"HTTP {e.code}: {body}", e.code)
+            raise VietnamFBError(f"HTTP {e.code}: {body}", e.code,
+                                 definitive=e.code != 408 and e.code < 500) from None
         except urllib.error.URLError as e:
-            LOG.error("API %s network error: %s", site, e)
-            raise VietnamFBError(f"Network error: {e}")
+            reason = getattr(e, "reason", "network error")
+            LOG.error("API %s network error: %s", site, reason)
+            raise VietnamFBError(f"Network error: {reason}", definitive=False) from None
         except json.JSONDecodeError as e:
             LOG.error("API %s invalid JSON: %s", site, e)
-            raise VietnamFBError(f"Invalid JSON response: {e}")
+            raise VietnamFBError(f"Invalid JSON response: {e}", definitive=False) from None
 
     def get_services(self, force_refresh: bool = False) -> list[Service]:
         """Lấy danh sách tất cả dịch vụ, cache 5 phút."""
@@ -183,7 +191,7 @@ class VietnamFBAPI:
 
         resp = self._post("add", data)
         if not isinstance(resp, dict):
-            raise VietnamFBError(f"Unexpected add order response: {resp}")
+            raise VietnamFBError(f"Unexpected add order response: {resp}", definitive=False)
 
         # Kiểm tra lỗi
         if "error" in resp:
@@ -193,7 +201,7 @@ class VietnamFBAPI:
 
         order_id = str(resp.get("order", resp.get("order_id", "")))
         if not order_id:
-            raise VietnamFBError("Missing order ID in response")
+            raise VietnamFBError("Missing order ID in response", definitive=False)
 
         return OrderResult(
             order_id=order_id,

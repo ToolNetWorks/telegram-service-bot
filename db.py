@@ -1,4 +1,10 @@
-"""SQLite persistence for Telegram service catalog, wallet, orders and support.
+"""Persistence for Telegram service catalog, wallet, orders and support.
+
+Two backends are supported:
+  * Turso (remote libSQL) when TURSO_URL and TURSO_TOKEN are set.  This is
+    the production backend and is selected strictly -- there is no silent
+    fallback to local SQLite.
+  * Local SQLite otherwise (development, tests and offline rollback).
 
 All money amounts are integers (VND); transitions are guarded and idempotent.
 Run only one polling instance for each bot token/database.
@@ -8,14 +14,29 @@ from __future__ import annotations
 from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 import json
+import logging
+import os
 from pathlib import Path
 import sqlite3
-import time
 import uuid
+
+from turso_client import TursoConnection, TursoError
+
+LOG = logging.getLogger("servicebot.db")
 
 
 def utcnow() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
+
+
+def _turso_config():
+    url = os.getenv("TURSO_URL", "").strip()
+    token = os.getenv("TURSO_TOKEN", "").strip()
+    if not url and not token:
+        return None
+    if not url or not token:
+        raise RuntimeError("TURSO_URL và TURSO_TOKEN phải được thiết lập cùng nhau")
+    return url, token
 
 
 CATALOG = (
@@ -30,13 +51,29 @@ CATALOG = (
 
 
 class Database:
-    def __init__(self, filename: str):
-        Path(filename).parent.mkdir(parents=True, exist_ok=True)
-        self.conn = sqlite3.connect(filename, isolation_level=None, timeout=10)
-        self.conn.row_factory = sqlite3.Row
-        self.conn.execute("PRAGMA journal_mode=WAL")
-        self.conn.execute("PRAGMA foreign_keys=ON")
-        self.conn.execute("PRAGMA busy_timeout=10000")
+    def __init__(self, filename: str, backend: str | None = None):
+        if backend not in (None, "sqlite", "turso"):
+            raise ValueError("backend phải là 'sqlite' hoặc 'turso'")
+        turso = _turso_config() if backend in (None, "turso") else None
+        if backend == "turso" and not turso:
+            raise RuntimeError("TURSO_URL và TURSO_TOKEN chưa được thiết lập")
+        if turso:
+            url, token = turso
+            try:
+                self.conn = TursoConnection(url, token)
+            except TursoError as exc:
+                raise RuntimeError(f"Không kết nối được Turso: {exc}") from exc
+            self.backend = "turso"
+            LOG.info("Database backend: Turso (remote)")
+        else:
+            Path(filename).parent.mkdir(parents=True, exist_ok=True)
+            self.conn = sqlite3.connect(filename, isolation_level=None, timeout=10)
+            self.conn.row_factory = sqlite3.Row
+            self.conn.execute("PRAGMA journal_mode=WAL")
+            self.conn.execute("PRAGMA foreign_keys=ON")
+            self.conn.execute("PRAGMA busy_timeout=10000")
+            self.backend = "sqlite"
+            LOG.info("Database backend: SQLite (%s)", filename)
         self.conn.executescript("""
             CREATE TABLE IF NOT EXISTS users (
                 user_id INTEGER PRIMARY KEY, username TEXT NOT NULL DEFAULT '',
@@ -122,7 +159,10 @@ class Database:
             yield
             self.conn.execute("COMMIT")
         except BaseException:
-            self.conn.execute("ROLLBACK")
+            try:
+                self.conn.execute("ROLLBACK")
+            except Exception:
+                LOG.exception("Không thể rollback giao dịch; kết nối có thể đã mất")
             raise
 
     def one(self, sql: str, params=()):
@@ -158,7 +198,16 @@ class Database:
                                  (language, user_id)).rowcount == 1
 
     def set_state(self, user_id: int, state: str, **data):
-        self.conn.execute("UPDATE users SET state=?,state_data=? WHERE user_id=?", (state, json.dumps(data), user_id))
+        payload = json.dumps(data) if data else "{}"
+        self.conn.execute("UPDATE users SET state=?,state_data=? WHERE user_id=?", (state, payload, user_id))
+
+    def claim_state(self, user_id: int, expected: str) -> bool:
+        """Atomically consume a one-shot state (prevents double-submit)."""
+        cur = self.conn.execute(
+            "UPDATE users SET state='',state_data='{}' WHERE user_id=? AND state=?",
+            (user_id, expected),
+        )
+        return cur.rowcount == 1
 
     def get_state(self, user_id: int):
         user = self.get_user(user_id)
@@ -177,6 +226,9 @@ class Database:
     def get_service(self, service_id: int):
         return self.one("SELECT * FROM services WHERE id=? AND enabled=1", (service_id,))
 
+    def get_service_by_title(self, title: str):
+        return self.one("SELECT * FROM services WHERE title=?", (title,))
+
     def set_price(self, service_id: int, price: int) -> bool:
         if price < 0:
             return False
@@ -185,7 +237,7 @@ class Database:
     def count_active_orders(self, user_id: int):
         return self.one(
             "SELECT COUNT(*) c FROM orders WHERE user_id=? AND status IN "
-            "('awaiting_quote','awaiting_payment','pending_review','processing')", (user_id,)
+            "('awaiting_quote','awaiting_payment','pending_review','processing','pending_reconciliation')", (user_id,)
         )["c"]
 
     def create_order(self, user_id: int, service_id: int, subject: str, kind: str, evidence: str,
@@ -250,7 +302,10 @@ class Database:
             return self.get_order(order_id) if cur.rowcount else None
 
     def set_order_status(self, order_id: int, next_status: str):
-        transitions = {"processing": ("pending_review",), "completed": ("processing",)}
+        transitions = {
+            "processing": ("pending_review", "pending_reconciliation"),
+            "completed": ("processing",),
+        }
         if next_status not in transitions:
             return None
         with self.transaction():
@@ -293,63 +348,76 @@ class Database:
             (user_id, limit),
         )
 
-    def create_provider_order(
-        self,
-        user_id: int,
-        service_id: int,
-        provider_name: str,
-        provider_service_id: str,
-        provider_order_id: str,
-        quantity: int,
-        link: str,
-        unit_price_milli: int,
-        markup_percent: int,
-        api_price_per_1000_milli: int,
-        amount: int,
-    ) -> int:
-        """Tạo provider_order liên kết với order nội bộ. Trả về provider_order id."""
+    def begin_provider_order(self, user_id: int, service_id: int, request_key: str,
+                             subject: str, evidence: str, amount: int):
+        """Atomically create a local order and debit the wallet once.
+
+        Returns ``(outcome, order)`` where outcome is ``ok``, ``duplicate``,
+        ``insufficient`` or ``invalid``.  The unique ``request_key`` makes a
+        double-submitted confirmation harmless even if the state claim races.
+        """
+        if amount <= 0 or not request_key:
+            return "invalid", None
         with self.transaction():
-            # Tạo order nội bộ trước
-            request_key = f"prov_{provider_name}_{provider_order_id}_{int(time.time())}"
+            existing = self.one("SELECT * FROM orders WHERE request_key=?", (request_key,))
+            if existing:
+                return "duplicate", existing
             cur = self.conn.execute(
-                "INSERT INTO orders(user_id,service_id,request_key,subject,evidence_kind,evidence,amount,status,created_at,updated_at) "
-                "VALUES (?,?,?,?,?,?,?,?,?,?)",
-                (
-                    user_id,
-                    service_id,
-                    request_key,
-                    f"{provider_name}:{provider_service_id}",
-                    "provider_order",
-                    f"link={link};qty={quantity}",
-                    amount,
-                    "processing",
-                    utcnow(),
-                    utcnow(),
-                ),
+                "UPDATE users SET balance=balance-? WHERE user_id=? AND balance>=?",
+                (amount, user_id, amount),
+            )
+            if cur.rowcount == 0:
+                return "insufficient", None
+            cur = self.conn.execute(
+                "INSERT INTO orders(user_id,service_id,request_key,subject,evidence_kind,evidence,"
+                "amount,paid,status,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+                (user_id, service_id, request_key, subject, "provider_order", evidence,
+                 amount, 1, "processing", utcnow(), utcnow()),
             )
             order_id = cur.lastrowid
-            # Tạo provider_order
             self.conn.execute(
+                "INSERT INTO ledger(user_id,delta,kind,reference,created_at) VALUES (?,?,?,?,?)",
+                (user_id, -amount, "provider_payment", f"order:{order_id}", utcnow()),
+            )
+            return "ok", self.one("SELECT * FROM orders WHERE id=?", (order_id,))
+
+    def attach_provider_order(self, order_id: int, provider_name: str,
+                              provider_service_id: str, provider_order_id: str,
+                              quantity: int, link: str, unit_price_milli: int,
+                              markup_percent: int, api_price_per_1000_milli: int,
+                              api_response: dict | None = None) -> int:
+        """Persist the provider's confirmation for an existing local order.
+
+        Idempotent: a retry after a lost response returns the existing row.
+        """
+        with self.transaction():
+            existing = self.one("SELECT id FROM provider_orders WHERE order_id=?", (order_id,))
+            if existing:
+                return existing["id"]
+            cur = self.conn.execute(
                 "INSERT INTO provider_orders(order_id,provider_name,provider_service_id,provider_order_id,"
                 "quantity,link,unit_price_milli,markup_percent,api_price_per_1000_milli,status,api_response,created_at,updated_at) "
                 "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
-                (
-                    order_id,
-                    provider_name,
-                    provider_service_id,
-                    provider_order_id,
-                    quantity,
-                    link,
-                    unit_price_milli,
-                    markup_percent,
-                    api_price_per_1000_milli,
-                    "processing",
-                    "{}",
-                    utcnow(),
-                    utcnow(),
-                ),
+                (order_id, provider_name, provider_service_id, provider_order_id,
+                 quantity, link, unit_price_milli, markup_percent,
+                 api_price_per_1000_milli, "processing",
+                 json.dumps(api_response or {}, ensure_ascii=False), utcnow(), utcnow()),
             )
-            return order_id
+            self.conn.execute(
+                "UPDATE orders SET status='processing',updated_at=? WHERE id=?",
+                (utcnow(), order_id),
+            )
+            return cur.lastrowid
+
+    def mark_order_pending_reconciliation(self, order_id: int) -> bool:
+        """Keep the debit but flag the order for manual/provider reconciliation."""
+        with self.transaction():
+            cur = self.conn.execute(
+                "UPDATE orders SET status='pending_reconciliation',updated_at=? "
+                "WHERE id=? AND status NOT IN ('rejected','completed')",
+                (utcnow(), order_id),
+            )
+            return cur.rowcount == 1
 
     def get_provider_order(self, order_id: int):
         return self.one(

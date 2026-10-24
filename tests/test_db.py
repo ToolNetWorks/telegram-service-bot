@@ -99,6 +99,51 @@ class DbTests(unittest.TestCase):
         self.assertEqual(len(migrated.list_services()), 7)
         migrated.close()
 
+    def test_claim_state_is_one_shot(self):
+        self.db.set_state(101, "confirm", nonce="abc")
+        self.assertTrue(self.db.claim_state(101, "confirm"))
+        self.assertFalse(self.db.claim_state(101, "confirm"))
+        state, data = self.db.get_state(101)
+        self.assertEqual(state, "")
+        self.assertEqual(data, {})
+
+    def test_begin_provider_order_atomic_and_idempotent(self):
+        self.assertTrue(self.db.credit(101, 100000))
+        tool_id = self.db.get_service_by_title("Tool Access")["id"]
+        outcome, order = self.db.begin_provider_order(
+            101, tool_id, "tgprov:nonce1", "vietnamfb:1720", "link=https://t.me/x;qty=1000", 40000)
+        self.assertEqual(outcome, "ok")
+        self.assertEqual(self.db.get_user(101)["balance"], 60000)
+        self.assertEqual(order["status"], "processing")
+        self.assertEqual(order["paid"], 1)
+        self.assertEqual(self.db.one(
+            "SELECT COUNT(*) c FROM ledger WHERE kind='provider_payment'")["c"], 1)
+
+        outcome2, order2 = self.db.begin_provider_order(
+            101, tool_id, "tgprov:nonce1", "vietnamfb:1720", "link=https://t.me/x;qty=1000", 40000)
+        self.assertEqual(outcome2, "duplicate")
+        self.assertEqual(order2["id"], order["id"])
+        self.assertEqual(self.db.get_user(101)["balance"], 60000)
+
+        outcome3, _ = self.db.begin_provider_order(
+            101, tool_id, "tgprov:nonce2", "vietnamfb:1720", "link=x;qty=1000", 90000)
+        self.assertEqual(outcome3, "insufficient")
+        self.assertEqual(self.db.get_user(101)["balance"], 60000)
+
+    def test_attach_provider_order_is_idempotent(self):
+        self.assertTrue(self.db.credit(101, 100000))
+        tool_id = self.db.get_service_by_title("Tool Access")["id"]
+        _, order = self.db.begin_provider_order(
+            101, tool_id, "tgprov:nonce3", "vietnamfb:1720", "link=x;qty=10", 1000)
+        first = self.db.attach_provider_order(
+            order["id"], "vietnamfb", "1720", "provider-1", 10, "https://t.me/x",
+            40686, 100, 20343, {"order": "provider-1"})
+        second = self.db.attach_provider_order(
+            order["id"], "vietnamfb", "1720", "provider-1", 10, "https://t.me/x",
+            40686, 100, 20343, {"order": "provider-1"})
+        self.assertEqual(first, second)
+        self.assertEqual(self.db.one("SELECT COUNT(*) c FROM provider_orders")["c"], 1)
+
     def test_service_catalog_and_caps(self):
         self.assertEqual(len(self.db.list_services()), 7)
         self.assertEqual(len(self.db.list_services("youtube")), 1)

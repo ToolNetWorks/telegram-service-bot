@@ -47,7 +47,7 @@ EN = {
     "tg_member_insufficient_balance": "Insufficient balance. Need <b>{need:,} VND</b>, you have <b>{have:,} VND</b>. Please deposit first.",
     "tg_member_placing": "Placing order via provider...",
     "tg_member_success": "Order placed successfully!\n\n"
-                          "Provider Order ID: <code>{provider_order_id}</b>\n"
+                          "Provider Order ID: <code>{provider_order_id}</code>\n"
                           "Service: <b>{service_name}</b>\n"
                           "Quantity: <b>{quantity:,}</b> members\n"
                           "Total charged: <b>{total:,} VND</b>\n\n"
@@ -58,6 +58,9 @@ EN = {
     "tg_member_timeout": "Provider request timed out. Order status unknown. Please check My Orders or contact support.",
     "tg_member_duplicate": "Duplicate order detected. Please check My Orders.",
     "tg_member_link_group_only": "This service supports Telegram Groups only. Please provide a group link.",
+    "tg_member_pending_reconcile": "The provider result could not be confirmed yet. Your order <b>#{order_id}</b> is kept for reconciliation and the charge is on hold. Support will verify it shortly.",
+    "tg_member_db_busy": "The system is temporarily busy. Please try again in a few seconds.",
+    "tg_member_unavailable": "This service is temporarily unavailable. You have not been charged. Please try again later.",
     "confirm_pay": "Confirm & Pay",
     "cancel": "Cancel",
     "choose_language": "Verified!\n\nWelcome to our community!\nChoose your language below to get started.",
@@ -124,7 +127,7 @@ VI = {
     "tg_member_insufficient_balance": "Số dư không đủ. Cần <b>{need:,} VND</b>, bạn có <b>{have:,} VND</b>. Hãy nạp tiền trước.",
     "tg_member_placing": "Đang đặt hàng qua nhà cung cấp...",
     "tg_member_success": "Đặt hàng thành công!\n\n"
-                          "Provider Order ID: <code>{provider_order_id}</b>\n"
+                          "Provider Order ID: <code>{provider_order_id}</code>\n"
                           "Dịch vụ: <b>{service_name}</b>\n"
                           "Số lượng: <b>{quantity:,}</b> member\n"
                           "Đã trừ: <b>{total:,} VND</b>\n\n"
@@ -135,6 +138,9 @@ VI = {
     "tg_member_timeout": "Yêu cầu tới nhà cung cấp hết thời gian. Trạng thái đơn chưa rõ. Kiểm tra <b>Đơn của tôi</b> hoặc liên hệ hỗ trợ.",
     "tg_member_duplicate": "Phát hiện đơn trùng lặp. Vui lòng kiểm tra <b>Đơn của tôi</b>.",
     "tg_member_link_group_only": "Dịch vụ này chỉ hỗ trợ Telegram Group. Vui lòng cung cấp link nhóm.",
+    "tg_member_pending_reconcile": "Chưa xác nhận được kết quả từ nhà cung cấp. Đơn <b>#{order_id}</b> đã được giữ để đối soát và khoản trừ đang tạm giữ. Bộ phận hỗ trợ sẽ kiểm tra ngay.",
+    "tg_member_db_busy": "Hệ thống đang bận tạm thời. Vui lòng thử lại sau vài giây.",
+    "tg_member_unavailable": "Dịch vụ tạm thời không khả dụng. Bạn chưa bị trừ tiền. Vui lòng thử lại sau.",
     "confirm_pay": "Xác nhận & Thanh toán",
     "cancel": "Hủy",
     "choose_language": "Đã xác minh!\n\nChào mừng đến cộng đồng.\nChọn ngôn ngữ để bắt đầu.",

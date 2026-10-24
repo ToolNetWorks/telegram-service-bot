@@ -7,7 +7,7 @@ from unittest.mock import patch
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 from bot import App, TOOLS_GIF, WELCOME_GIF
-from vietnamfb_api import Service
+from vietnamfb_api import Service, VietnamFBError
 
 
 class StubTelegram:
@@ -475,6 +475,125 @@ class FlowTests(unittest.TestCase):
         self.assertEqual(po["provider_service_id"], "1720")
         self.assertEqual(po["quantity"], 1000)
         self.assertEqual(po["amount"], 40)
+
+    def prepare_tg_member_order(self, uid=111, quantity="1000", balance=50000):
+        self.onboard(uid=uid)
+        self.app.db.conn.execute("UPDATE users SET balance=? WHERE user_id=?", (balance, uid))
+        self.cb(uid, "tools")
+        self.cb(uid, "tools:engagement")
+        self.cb(uid, "engagement:telegram_members")
+        self.cb(uid, "tg_member_select:1720")
+        self.msg(uid, "https://t.me/testgroup")
+        self.msg(uid, quantity)
+        state, data = self.app.db.get_state(uid)
+        self.assertEqual(state, "tg_member_confirm")
+        return data
+
+    def test_telegram_members_double_confirm_charges_once(self):
+        self.prepare_tg_member_order(uid=111)
+        self.cb(111, "tg_member_confirm_pay")
+        self.cb(111, "tg_member_confirm_pay")
+        self.assertEqual(len(self.app.db.list_orders(111)), 1)
+        self.assertEqual(self.app.db.one("SELECT COUNT(*) c FROM provider_orders")["c"], 1)
+        self.assertEqual(self.app.db.get_user(111)["balance"], 49960)
+        self.assertEqual(self.app.db.one(
+            "SELECT COUNT(*) c FROM ledger WHERE kind='provider_payment'")["c"], 1)
+
+    def test_telegram_members_definitive_provider_error_refunds_once(self):
+        self.prepare_tg_member_order(uid=111)
+        provider = MockVietnamFB()
+
+        def reject(**_kwargs):
+            raise VietnamFBError("Provider từ chối dịch vụ", definitive=True)
+
+        provider.add_order = reject
+        self.app.provider = provider
+        self.cb(111, "tg_member_confirm_pay")
+        self.assertEqual(self.app.db.get_user(111)["balance"], 50000)
+        order = self.app.db.list_orders(111)[0]
+        self.assertEqual(self.app.db.get_order(order["id"])["status"], "rejected")
+        self.assertEqual(self.app.db.one("SELECT COUNT(*) c FROM provider_orders")["c"], 0)
+        self.assertEqual(self.app.db.one(
+            "SELECT COUNT(*) c FROM ledger WHERE kind='provider_payment'")["c"], 1)
+        self.assertEqual(self.app.db.one(
+            "SELECT COUNT(*) c FROM ledger WHERE kind='order_refund'")["c"], 1)
+
+    def test_telegram_members_ambiguous_error_keeps_charge_for_reconciliation(self):
+        self.prepare_tg_member_order(uid=111)
+        provider = MockVietnamFB()
+
+        def timeout(**_kwargs):
+            raise VietnamFBError("Network error: timed out", definitive=False)
+
+        provider.add_order = timeout
+        self.app.provider = provider
+        self.cb(111, "tg_member_confirm_pay")
+        self.assertEqual(self.app.db.get_user(111)["balance"], 49960)
+        order = self.app.db.list_orders(111)[0]
+        self.assertEqual(self.app.db.get_order(order["id"])["status"], "pending_reconciliation")
+        self.assertEqual(self.app.db.one("SELECT COUNT(*) c FROM provider_orders")["c"], 0)
+        self.assertEqual(self.app.db.one(
+            "SELECT COUNT(*) c FROM ledger WHERE kind='order_refund'")["c"], 0)
+        admin_texts = [c[2] for c in self.app.api.calls
+                       if c[0] == "sendMessage" and c[1] == 999]
+        self.assertTrue(any("đối soát" in text.lower() for text in admin_texts))
+
+    def test_telegram_members_db_failure_after_provider_does_not_refund(self):
+        self.prepare_tg_member_order(uid=111)
+        with patch.object(self.app.db, "attach_provider_order",
+                          side_effect=RuntimeError("db down")), \
+             patch("bot.time.sleep", return_value=None):
+            self.cb(111, "tg_member_confirm_pay")
+        self.assertEqual(self.app.db.get_user(111)["balance"], 49960)
+        order = self.app.db.list_orders(111)[0]
+        self.assertEqual(self.app.db.get_order(order["id"])["status"], "pending_reconciliation")
+        self.assertEqual(self.app.db.one("SELECT COUNT(*) c FROM provider_orders")["c"], 0)
+        self.assertEqual(self.app.db.one(
+            "SELECT COUNT(*) c FROM ledger WHERE kind='order_refund'")["c"], 0)
+        admin_texts = [c[2] for c in self.app.api.calls
+                       if c[0] == "sendMessage" and c[1] == 999]
+        self.assertTrue(any("provider đã nhận đơn" in text.lower() for text in admin_texts))
+
+    def test_telegram_members_lost_commit_recovers_order_without_double_debit(self):
+        self.prepare_tg_member_order(uid=111)
+        original = self.app.db.begin_provider_order
+
+        def lost_response(**kwargs):
+            original(**kwargs)
+            raise RuntimeError("commit response lost")
+
+        with patch.object(self.app.db, "begin_provider_order", side_effect=lost_response):
+            self.cb(111, "tg_member_confirm_pay")
+        self.assertEqual(self.app.db.get_user(111)["balance"], 49960)
+        orders = self.app.db.list_orders(111)
+        self.assertEqual(len(orders), 1)
+        self.assertEqual(orders[0]["status"], "processing")
+        self.assertIsNotNone(self.app.db.get_provider_order(orders[0]["id"]))
+        self.assertEqual(self.app.db.one(
+            "SELECT COUNT(*) c FROM ledger WHERE kind='provider_payment'")["c"], 1)
+
+    def test_telegram_members_lost_refund_commit_is_not_treated_as_pending(self):
+        self.prepare_tg_member_order(uid=111)
+        provider = MockVietnamFB()
+
+        def reject(**_kwargs):
+            raise VietnamFBError("Provider từ chối", definitive=True)
+
+        provider.add_order = reject
+        self.app.provider = provider
+        original = self.app.db.reject_order
+
+        def lost_refund_response(order_id):
+            original(order_id)
+            raise RuntimeError("refund commit response lost")
+
+        with patch.object(self.app.db, "reject_order", side_effect=lost_refund_response):
+            self.cb(111, "tg_member_confirm_pay")
+        self.assertEqual(self.app.db.get_user(111)["balance"], 50000)
+        order = self.app.db.list_orders(111)[0]
+        self.assertEqual(self.app.db.get_order(order["id"])["status"], "rejected")
+        self.assertEqual(self.app.db.one(
+            "SELECT COUNT(*) c FROM ledger WHERE kind='order_refund'")["c"], 1)
 
     def test_telegram_members_insufficient_balance(self):
         """Test ordering with insufficient balance."""

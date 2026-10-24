@@ -39,7 +39,7 @@ docker run --rm --entrypoint python3 \
   -e VIETNAMFB_API_KEY="test_key_12345" \
   -e VIETNAMFB_BASE_URL="https://test.vietnamfb.com" \
   "$IMAGE_NAME" \
-  -m unittest tests.test_flows -v 2>&1
+  -m unittest tests.test_flows tests.test_turso_client -v 2>&1
 
 echo ""
 echo "3. Running database tests..."
@@ -140,6 +140,17 @@ if [ -f "$TEST_DATA_DIR/bot.sqlite3-wal" ] || [ -f "$TEST_DATA_DIR/bot.sqlite3-s
 else
     echo "   ℹ No WAL files (checkpointed or not yet created)"
 fi
+
+echo ""
+echo "8. Running container health check (SQLite mode)..."
+docker run --rm --entrypoint python3 \
+  -e BOT_TOKEN="100000:dummy" \
+  -e ADMIN_IDS="999" \
+  -e DB_PATH="/data/bot.sqlite3" \
+  -e DB_BACKEND="sqlite" \
+  -v "$TEST_DATA_DIR:/data" \
+  --user root \
+  "$IMAGE_NAME" healthcheck.py
 
 echo ""
 echo "=== All Smoke Tests Passed ==="

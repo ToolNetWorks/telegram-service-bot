@@ -20,12 +20,13 @@ RUN groupadd -r botuser && useradd -r -g botuser -d /app -s /bin/bash botuser
 WORKDIR /app
 
 # Copy source code
-COPY --chown=botuser:botuser bot.py db.py i18n.py vietnamfb_api.py ./
+COPY --chown=botuser:botuser bot.py db.py i18n.py vietnamfb_api.py turso_client.py healthcheck.py ./
+COPY --chown=botuser:botuser migrate_to_turso.py migrate_from_turso.py ./
 COPY --chown=botuser:botuser tests/ ./tests/
 COPY --chown=botuser:botuser assets/ ./assets/
 COPY --chown=botuser:botuser .env.example ./
 
-# Create data directory for persistent volume
+# Optional local directory (SQLite fallback / rollback only; Turso needs no volume)
 RUN mkdir -p /data && chown botuser:botuser /data
 
 # Create logs directory
@@ -40,9 +41,9 @@ ENV PYTHONUNBUFFERED=1 \
     DB_PATH=/data/bot.sqlite3 \
     LOG_LEVEL=INFO
 
-# Health check: verify process is alive and can connect to Telegram
-HEALTHCHECK --interval=60s --timeout=10s --start-period=30s --retries=3 \
-    CMD python3 -c "import sys, os; sys.path.insert(0, '.'); from bot import App; print('OK')" || exit 1
+# Health check: verify the configured database (Turso when TURSO_URL is set)
+HEALTHCHECK --interval=60s --timeout=15s --start-period=30s --retries=3 \
+    CMD ["python3", "healthcheck.py"]
 
 # Run the bot
 ENTRYPOINT ["python3", "-m", "bot"]

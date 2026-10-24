@@ -1,291 +1,215 @@
-# Northflank Deployment Guide - ToolNet Telegram Service Bot
+# Northflank Deployment Guide — ToolNet Telegram Service Bot (Turso)
 
-## Overview
-This bot runs as a **Worker service** on Northflank with:
-- No public port (long polling only)
-- Persistent Volume at `/data` for SQLite database
-- Environment variables via Northflank Secrets/Config
-- Single instance (replicas=1)
+## 1. Kiến trúc production
 
----
+- **Northflank Worker service**, Telegram **long polling**.
+- **Không public port**.
+- **Đúng 1 replica** (không bao giờ chạy 2 nơi cùng `getUpdates`).
+- **Không cần Persistent Volume** cho database: dữ liệu nằm trên **Turso**.
+- Container chạy non-root, có `SIGTERM` graceful shutdown, health check DB.
+- Nếu `TURSO_URL` + `TURSO_TOKEN` được đặt, bot **chỉ** dùng Turso.
+  Không có fallback âm thầm sang SQLite. Turso lỗi → bot dừng và để
+  Northflank restart; dữ liệu không bị ghi nhầm vào file local.
 
-## 1. Northflank Service Configuration
-
-### Service Type: Worker
-- **Repository**: Connect your GitHub repo `ToolNetWorks/telegram-service-bot`
-- **Branch**: `master` (or your deployment branch)
-- **Build**: Dockerfile (auto-detected)
-- **Ports**: None (uncheck "Create public port")
-- **Replicas**: 1 (critical - single instance for long polling)
-- **Auto-deploy**: On push to branch (optional)
-
-### Persistent Volume
-- **Mount Path**: `/data`
-- **Size**: 1 GiB (adjust as needed)
-- **Volume Name**: `telegram-bot-data`
-- This stores: `bot.sqlite3`, `bot.sqlite3-wal`, `bot.sqlite3-shm`
-
----
-
-## 2. Environment Variables (Secrets/Config)
-
-### Required Secrets (Mark as Secret in Northflank)
-| Variable | Description | Example |
-|----------|-------------|---------|
-| `BOT_TOKEN` | Telegram BotFather token | `123456:ABC-DEF...` |
-| `ADMIN_IDS` | Comma-separated admin user IDs | `1208342332` |
-| `VIETNAMFB_API_KEY` | VietnamFB SMM Panel API key | `f3a36...` |
-
-### Config Variables (Non-secret)
-| Variable | Description | Default |
-|----------|-------------|---------|
-| `BOT_NAME` | Bot display name | `ToolNet Services` |
-| `SUPPORT_USERNAME` | Support contact (no @) | `` |
-| `DB_PATH` | **Must be `/data/bot.sqlite3`** | `/data/bot.sqlite3` |
-| `LOG_LEVEL` | Logging level | `INFO` |
-| `BANK_NAME` | Bank name for deposits | `` |
-| `BANK_ACCOUNT` | Bank account number | `` |
-| `BANK_OWNER` | Bank account owner name | `` |
-| `VIETNAMFB_BASE_URL` | API base URL | `https://vietnamfb.com` |
-
----
-
-## 3. Database Migration from VPS to Northflank
-
-### Option A: Manual Backup/Restore (Recommended for first migration)
-
-#### On VPS (Source):
-```bash
-# 1. Stop bot gracefully (ensure clean WAL checkpoint)
-cd ~/telegram-service-bot
-./stop_bot.sh  # or kill -TERM <pid>; wait for process to exit
-
-# 2. Verify WAL is checkpointed (no -wal file or it's small)
-ls -la data/
-
-# 3. Create backup with WAL included
-tar -czf bot-data-backup-$(date +%Y%m%d-%H%M%S).tar.gz data/
-
-# 4. Download backup to local machine
-scp ubuntu@your-vps:~/telegram-service-bot/bot-data-backup-*.tar.gz .
+```
+Telegram  <--long poll-->  Northflank Worker (1 replica)
+                                  |
+                                  +--> Turso (libSQL, HTTPS/Hrana v2)
+                                  +--> VietnamFB API (đặt đơn)
 ```
 
-#### On Northflank (Target):
-```bash
-# Option 1: Using Northflank CLI (if available)
-# northflank volume upload telegram-bot-data ./data/
-
-# Option 2: Start service with empty volume, then use Northflank shell
-# 1. Deploy service with empty /data volume
-# 2. Open Northflank shell: `northflank service shell <service-name>`
-# 3. Upload backup via base64 or use `nc`/`curl` to transfer
-# 4. Extract to /data:
-#    tar -xzf bot-data-backup-*.tar.gz -C /
-# 5. Verify: ls -la /data/
-# 6. Restart service
-```
-
-### Option B: Northflank Volume Import (if supported)
-Use Northflank dashboard to import volume from backup file.
-
-### Option C: Live Replication (Advanced)
-Not recommended for SQLite. Use Option A.
+> **Chọn region Northflank gần Turso** (database đang ở
+> `aws-eu-west-1`). Nên chọn Europe/EU. Mỗi truy vấn Turso là một HTTPS
+> request; đặt worker ở EU giúp giảm độ trễ từ ~1s (VPS châu Á) xuống
+> vài chục ms.
 
 ---
 
-## 4. Safe Cutover Procedure (Zero-Downtime Switch)
+## 2. Biến môi trường trên Northflank
 
-### Pre-requisites:
-- Northflank service deployed and tested (see Section 5)
-- VPS bot still running
-- Database backup verified
+### Secrets (bắt buộc)
 
-### Cutover Steps:
-```
-1. VPS:        Stop bot gracefully (SIGTERM)
-               ./stop_bot.sh
-               # Wait for process to exit (checks logs: "Bot stopped")
+| Biến | Ý nghĩa |
+|---|---|
+| `BOT_TOKEN` | Token BotFather |
+| `ADMIN_IDS` | Danh sách user ID admin, phân tách bằng dấu phẩy |
+| `VIETNAMFB_API_KEY` | API key VietnamFB |
+| `TURSO_URL` | `libsql://...` hoặc `https://...` của database |
+| `TURSO_TOKEN` | Token Turso (quyền đọc/ghi) |
 
-2. VPS:        Final backup
-               tar -czf final-backup.tar.gz data/
+### Config (không bí mật)
 
-3. Northflank: Upload final backup to volume
-               (Use Northflank shell or CLI)
+| Biến | Mặc định |
+|---|---|
+| `BOT_NAME` | `ToolNet Services` |
+| `SUPPORT_USERNAME` | (rỗng) |
+| `LOG_LEVEL` | `INFO` |
+| `BANK_NAME`, `BANK_ACCOUNT`, `BANK_OWNER` | (rỗng — chỉ mở nạp tiền khi đủ 3) |
+| `VIETNAMFB_BASE_URL` | `https://vietnamfb.com` |
 
-4. Northflank: Start service (1 replica)
-               # Bot begins long polling
+Không cần đặt `DB_PATH` khi dùng Turso. `DB_PATH` chỉ dùng cho dev/test
+hoặc rollback SQLite.
 
-5. Verify:     Test /start in Telegram
-               Check all menus work
-               Place test order (mock in test env)
-
-6. Rollback (if needed):
-               Northflank: Stop service (scale to 0)
-               VPS: Restore backup, start bot
-```
-
-### Critical Rule:
-**NEVER run both instances simultaneously** - Telegram will reject getUpdates from the second instance with "Conflict: terminated by other getUpdates request".
+**Không commit `.env`, backup, database hay token vào git.**
 
 ---
 
-## 5. Local Docker Testing (Pre-deployment)
+## 3. Kiểm tra trước khi deploy
 
-### Build Image:
+Chạy trên VPS (bot production vẫn đang chạy trong bước này):
+
 ```bash
 cd ~/telegram-service-bot
-docker build -t telegram-service-bot:test .
+python3 -m unittest discover -s tests -v          # 32 test, không gọi API thật
+python3 tests/turso_live_check.py                 # kết nối + transaction thật
+python3 tests/turso_app_check.py                  # end-to-end với provider mock
+python3 migrate_to_turso.py --verify-only         # so sánh SQLite ↔ Turso
 ```
 
-### Run Unit Tests in Container:
+Kết quả mong đợi: tất cả `OK`, `MIGRATE THÀNH CÔNG`, không có token
+trong log.
+
+Build và smoke test Docker:
+
 ```bash
-docker run --rm \
-  -e BOT_TOKEN=100000:dummy \
-  -e ADMIN_IDS=999 \
-  -e BOT_NAME=Test \
-  -e DB_PATH=/tmp/bot.sqlite3 \
-  -e VIETNAMFB_API_KEY=test_key \
-  -e VIETNAMFB_BASE_URL=https://test.vietnamfb.com \
-  telegram-service-bot:test \
-  python3 -m unittest tests.test_flows -v
+sudo docker build -t telegram-service-bot .
+sudo ./docker-smoke-test.sh
 ```
 
-### Smoke Test (Mock API):
+---
+
+## 4. Migrate dữ liệu SQLite → Turso
+
+Script tạo backup WAL-safe trước, giữ nguyên ID, ví, referral, đơn,
+provider order, nạp tiền, ledger, ticket và settings.
+
 ```bash
-docker run --rm \
-  -e BOT_TOKEN=100000:dummy \
-  -e ADMIN_IDS=999 \
-  -e BOT_NAME=Test \
-  -e DB_PATH=/data/bot.sqlite3 \
-  -e VIETNAMFB_API_KEY=test_key \
-  -e VIETNAMFB_BASE_URL=https://test.vietnamfb.com \
-  -v $(pwd)/test-data:/data \
-  telegram-service-bot:test \
-  timeout 30 python3 -m bot || true
+# Xem trước số bản ghi, không ghi gì
+python3 migrate_to_turso.py --dry-run
+
+# Lần đầu / đồng bộ lại toàn bộ (xoá dữ liệu nghiệp vụ trên Turso rồi copy)
+python3 migrate_to_turso.py --replace --yes
+
+# Kiểm tra lại
+python3 migrate_to_turso.py --verify-only
 ```
 
-### Verify Image:
+Script **từ chối** ghi đè nếu Turso đã có users/orders/ledger mà không
+có `--replace`. SQLite gốc không bao giờ bị xoá/sửa.
+
+---
+
+## 5. Tạo service trên Northflank
+
+1. **Create service → Worker**.
+2. **Repository**: `ToolNetWorks/telegram-service-bot`, branch `master`.
+3. **Build**: Dockerfile.
+4. **Ports**: không tạo public port.
+5. **Replicas**: `1` (cố định).
+6. **Persistent volume**: không cần.
+7. **Region**: Europe (gần Turso `aws-eu-west-1`).
+8. **Restart policy**: `Always` / `On failure`.
+9. **Termination grace period**: `30s` (long poll timeout 25s).
+10. Thêm toàn bộ Secrets/Config ở mục 2.
+11. **Health check**: Dockerfile đã có
+    `HEALTHCHECK CMD ["python3","healthcheck.py"]`.
+    Nếu Northflank hỗ trợ command health check, dùng:
+    `python3 healthcheck.py` (timeout 15s, interval 60s).
+12. **Logging**: stdout/stderr; không log token/URL.
+
+Deploy nhưng **chưa start** (hoặc start với replicas=0) cho đến bước
+cutover.
+
+---
+
+## 6. Cutover an toàn (một chiều)
+
+> Điều kiện tiên quyết: Docker tests PASS, `--verify-only` PASS, đã có
+> backup SQLite, Northflank service sẵn sàng.
+
 ```bash
-# Check image size
-docker images telegram-service-bot:test
+# 1. Trên VPS: dừng bot, đảm bảo không còn process polling
+cd ~/telegram-service-bot
+./botctl.sh stop
+./botctl.sh status
+pgrep -af "python3 -m bot" || echo "VPS bot stopped"
 
-# Inspect layers
-docker history telegram-service-bot:test
+# 2. Backup cuối cùng (WAL-safe)
+./backup-sqlite.sh
+
+# 3. Đồng bộ snapshot cuối lên Turso
+python3 migrate_to_turso.py --replace --yes
+python3 migrate_to_turso.py --verify-only
+
+# 4. Trên Northflank: scale service lên 1 replica / bấm Deploy
+#    (chỉ sau khi bước 1 đã xác nhận VPS không còn polling)
+
+# 5. Theo dõi log Northflank
+#    "Database backend: Turso (remote)"
+#    "Bot @ToolNettBot đã hoạt động, admin count=1"
 ```
 
+### Kiểm tra sau cutover
+
+- `/start` → xác minh captcha → menu inline.
+- Ví, Tool Access, Engagement, Telegram Members (chỉ mở báo giá;
+  **không bấm xác nhận** khi API balance = 0).
+- Đơn của tôi, ngôn ngữ, Admin `/admin`.
+- Log không có traceback Turso, không có token.
+
+### Quy tắc tuyệt đối
+
+- Không bật Northflank khi VPS còn polling.
+- Không bật lại VPS khi Northflank đang chạy.
+- Nếu cần kiểm tra song song, chỉ dùng môi trường test với bot token
+  khác.
+
 ---
 
-## 6. Northflank-Specific Files
+## 7. Rollback
 
-### `northflank.yaml` (Optional - for Infrastructure as Code)
-```yaml
-services:
-  - name: telegram-service-bot
-    type: worker
-    repo: ToolNetWorks/telegram-service-bot
-    branch: master
-    dockerfilePath: Dockerfile
-    replicas: 1
-    env:
-      - key: BOT_NAME
-        value: "ToolNet Services"
-      - key: DB_PATH
-        value: "/data/bot.sqlite3"
-      - key: LOG_LEVEL
-        value: "INFO"
-      - key: VIETNAMFB_BASE_URL
-        value: "https://vietnamfb.com"
-    secrets:
-      - BOT_TOKEN
-      - ADMIN_IDS
-      - VIETNAMFB_API_KEY
-    volumes:
-      - name: telegram-bot-data
-        mountPath: /data
-        size: 1Gi
+```bash
+# 1. Northflank: scale về 0 (dừng polling ngay)
+
+# 2. Nếu Northflank đã phát sinh giao dịch mới: export Turso -> SQLite
+cd ~/telegram-service-bot
+python3 migrate_from_turso.py
+# -> backups/rollback-YYYYmmdd-HHMMSS.sqlite3 (đã verify)
+
+# 3. VPS: khôi phục database và chạy lại bằng SQLite
+./botctl.sh stop
+./restore-sqlite.sh backups/rollback-YYYYmmdd-HHMMSS.sqlite3
+DB_BACKEND=sqlite ./botctl.sh start
 ```
 
----
-
-## 7. Monitoring & Logs
-
-### Northflank Logs:
-- View real-time logs in Northflank dashboard
-- Log format: `YYYY-MM-DD HH:MM:SS LEVEL name: message`
-
-### Health Check:
-- Built-in HEALTHCHECK runs every 60s
-- Verifies Python can import bot modules
-- Northflank will restart container if health check fails
-
-### Key Metrics to Watch:
-- Container restarts (should be 0)
-- Memory usage (typically < 100MB)
-- Log errors (API timeouts, DB locks)
+- `DB_BACKEND=sqlite` là lựa chọn **tường minh** để bỏ qua Turso khi
+  rollback. Không đặt biến này trên Northflank.
+- Nếu không có giao dịch mới trên Turso, có thể dùng backup SQLite
+  trước cutover thay cho bước export.
+- Luôn giữ backup trước cutover ở `backups/` (đã được `.gitignore`).
+- Sau rollback, xác nhận Northflank đã scale 0 và không còn gọi
+  `getUpdates`.
 
 ---
 
-## 8. Rollback Plan
+## 8. Vận hành & sự cố
 
-### If Northflank Deployment Fails:
-1. **Scale Northflank service to 0 replicas** (stops bot)
-2. **On VPS**: Bot is still running (we never stopped it during prep)
-3. **No data loss** - VPS database untouched
+| Triệu chứng | Kiểm tra |
+|---|---|
+| Bot không trả lời, log `Turso từ chối xác thực` | Sai/hết hạn `TURSO_TOKEN` |
+| Log `Turso lỗi kết nối` | Mạng Northflank → Turso, region, timeout |
+| Bot restart liên tục | `healthcheck.py` fail hoặc thiếu ENV bắt buộc |
+| `Không kết nối được Turso` lúc start | Không fallback SQLite; sửa ENV rồi restart |
+| Đơn provider “Chờ đối soát” | Admin kiểm tra panel; hoàn tiền bằng `/reject <order_id>` nếu provider chưa nhận |
+| Hai bot tranh `getUpdates` | Scale Northflank 0 hoặc stop VPS ngay |
 
-### If Cutover Fails (after VPS stopped):
-1. **Northflank**: Scale to 0
-2. **VPS**: Restore from `final-backup.tar.gz`
-   ```bash
-   tar -xzf final-backup.tar.gz -C /
-   ./start_bot.sh
-   ```
-3. **Investigate**: Check Northflank logs, fix issue, retry
+### Bảo vệ giao dịch
 
----
-
-## 9. Post-Migration Verification
-
-- [ ] `/start` shows welcome GIF and main menu
-- [ ] Tool Access → Engagement Services → Telegram Group Members shows 3 packages
-- [ ] Wallet shows correct balance
-- [ ] My Orders (Đơn của tôi) shows history
-- [ ] Admin commands work (`/ordersadmin`, `/deposits`, etc.)
-- [ ] Language switch (vi/en) works
-- [ ] Deposit flow works
-- [ ] Referral system works
-
----
-
-## 10. Troubleshooting
-
-| Issue | Solution |
-|-------|----------|
-| "Conflict: terminated by other getUpdates" | Another instance running. Scale Northflank to 0, check VPS. |
-| "Database is locked" | SQLite contention. Ensure single instance. Check WAL mode. |
-| "VIETNAMFB_API_KEY not set" | Add secret in Northflank, redeploy. |
-| "Permission denied /data" | Check volume mount, user permissions (botuser:botuser). |
-| Health check fails | Check logs for import errors. Verify all .py files copied. |
-
----
-
-## 11. File Checklist for Repository
-
-Ensure these files are committed:
-- [x] `Dockerfile`
-- [x] `.dockerignore`
-- [x] `.env.example` (updated with DB_PATH=/data/bot.sqlite3)
-- [x] `bot.py`, `db.py`, `i18n.py`, `vietnamfb_api.py`
-- [x] `tests/test_flows.py`, `tests/test_db.py`
-- [x] `assets/` (GIFs, videos)
-- [x] `README.md`
-- [x] `NORTHFLANK_DEPLOY.md` (this file)
-- [x] `.gitignore` (excludes .env, data/, logs/, backups/)
-
----
-
-## 12. Contact & Support
-
-For deployment issues, check:
-1. Northflank service logs
-2. This guide's troubleshooting section
-3. Bot's internal logs (in `/app/logs/` inside container)
+- `claim_state` nguyên tử: bấm xác nhận 2 lần chỉ tạo 1 đơn.
+- Order nội bộ + trừ ví + ledger nằm trong **một transaction** Turso.
+- `request_key` UNIQUE chống trùng; ledger có UNIQUE(kind, reference).
+- Provider trả order id → mới ghi `provider_orders`.
+- Provider từ chối rõ ràng → hoàn tiền đúng 1 lần.
+- Timeout/mất kết nối provider → giữ tiền, đánh dấu
+  `pending_reconciliation`, cảnh báo admin; không hoàn tiền mù.
+- Provider đã nhận đơn nhưng lỗi ghi DB → không hoàn tiền; admin đối soát.

@@ -1,6 +1,10 @@
 .env
+.env.local
+.env.*.local
 data/
+backups/
 *.sqlite3*
+*.bak
 __pycache__/
 *.pyc
 *.log

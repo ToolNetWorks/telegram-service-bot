@@ -26,6 +26,7 @@ from vietnamfb_api import VietnamFBAPI, create_api_client, VietnamFBError, Servi
 STATUSES = {
     "awaiting_quote": "Chờ báo giá", "awaiting_payment": "Chờ thanh toán",
     "pending_review": "Chờ xét duyệt", "processing": "Đang xử lý",
+    "pending_reconciliation": "Chờ đối soát",
     "completed": "Hoàn thành", "rejected": "Đã từ chối/hoàn tiền",
 }
 # Provider order statuses
@@ -159,12 +160,13 @@ class Telegram:
                 body = json.load(response)
         except urllib.error.HTTPError as exc:
             try:
-                detail = json.loads(exc.read().decode("utf-8")).get("description", str(exc))
+                detail = json.loads(exc.read().decode("utf-8")).get("description", f"HTTP {exc.code}")
             except (ValueError, OSError):
-                detail = str(exc)
-            raise ApiError(f"Telegram {method}: {detail}") from exc
+                detail = f"HTTP {exc.code}"
+            raise ApiError(f"Telegram {method}: {detail}") from None
         except (urllib.error.URLError, TimeoutError, ValueError) as exc:
-            raise ApiError(f"Network/API error at {method}: {str(exc)[:200]}") from exc
+            reason = getattr(exc, "reason", None) or type(exc).__name__
+            raise ApiError(f"Network/API error at {method}: {str(reason)[:200]}") from None
         if not body.get("ok"):
             raise ApiError(f"Telegram {method}: {body.get('description', 'unknown error')}")
         return body.get("result")
@@ -216,12 +218,13 @@ class Telegram:
                 result = json.load(response)
         except urllib.error.HTTPError as exc:
             try:
-                detail = json.loads(exc.read().decode("utf-8")).get("description", str(exc))
+                detail = json.loads(exc.read().decode("utf-8")).get("description", f"HTTP {exc.code}")
             except (ValueError, OSError):
-                detail = str(exc)
-            raise ApiError(f"Telegram {method}: {detail}") from exc
+                detail = f"HTTP {exc.code}"
+            raise ApiError(f"Telegram {method}: {detail}") from None
         except (urllib.error.URLError, TimeoutError, ValueError) as exc:
-            raise ApiError(f"Network/API error at {method}: {str(exc)[:200]}") from exc
+            reason = getattr(exc, "reason", None) or type(exc).__name__
+            raise ApiError(f"Network/API error at {method}: {str(reason)[:200]}") from None
         if not result.get("ok"):
             raise ApiError(f"Telegram {method}: {result.get('description', 'unknown error')}")
         return result.get("result")
@@ -245,7 +248,8 @@ class App:
         if not token or ":" not in token:
             raise ValueError("BOT_TOKEN phải lấy từ @BotFather và điền vào .env")
         self.api = Telegram(token)
-        self.db = Database(os.getenv("DB_PATH", "./data/bot.sqlite3"))
+        backend = os.getenv("DB_BACKEND", "").strip().lower() or None
+        self.db = Database(os.getenv("DB_PATH", "./data/bot.sqlite3"), backend=backend)
         self.admins = {int(x.strip()) for x in os.getenv("ADMIN_IDS", "").split(",") if x.strip().isdigit()}
         if not self.admins:
             raise ValueError("ADMIN_IDS chưa thiết lập; bot yêu cầu ít nhất một Admin")
@@ -398,76 +402,156 @@ class App:
                      keyboard(((self.t(uid, "cancel"), "tools:engagement"),)))
 
     def tg_member_confirm_pay(self, uid):
-        """Xử lý xác nhận thanh toán và đặt hàng qua API."""
-        state, data = self.db.get_state(uid)
+        """Xác nhận thanh toán và đặt đơn provider với các lớp chống trùng.
+
+        Thứ tự an toàn:
+          1. claim state nguyên tử (chống bấm 2 lần),
+          2. tạo order nội bộ + trừ ví + ghi ledger trong CÙNG transaction,
+          3. gọi provider,
+          4. chỉ ghi nhận thành công khi provider trả về order id,
+          5. lỗi rõ ràng -> hoàn tiền đúng 1 lần; lỗi mơ hồ -> chờ đối soát.
+        """
+        try:
+            state, data = self.db.get_state(uid)
+        except Exception:
+            LOG.exception("Không đọc được trạng thái đặt đơn uid=%s", uid)
+            return self.deliver(uid, self.t(uid, "tg_member_db_busy"),
+                                keyboard(((self.t(uid, "back_engagement"), "tools:engagement"),)))
         if state != "tg_member_confirm" or "service_id" not in data:
-            return self.deliver(uid, "Phiên đặt hàng không hợp lệ.", keyboard(((self.t(uid, "back_engagement"), "tools:engagement"),)))
-
-        svc = self.provider.get_service(data["service_id"])
-        if not svc:
-            self.db.set_state(uid, "")
-            return self.deliver(uid, "Dịch vụ không tồn tại.", keyboard(((self.t(uid, "back_engagement"), "tools:engagement"),)))
-
-        quantity = data["quantity"]
-        total = data["total"]
-        link = data["link"]
-        unit_price_milli = data["unit_price_milli"]
-        api_price_milli = data["api_price_milli"]
-        markup_percent = data["markup_percent"]
-
-        # Double-check balance
-        user = self.db.get_user(uid)
-        if user["balance"] < total:
-            self.db.set_state(uid, "")
-            return self.deliver(uid, self.t(uid, "tg_member_insufficient_balance", need=total, have=user["balance"]),
-                                keyboard(((self.t(uid, "cancel"), "tools:engagement"),)))
-
-        # Check for duplicate (same user, service, link, quantity in recent orders)
-        existing = self.db.get_provider_order_by_provider_id("vietnamfb", f"pending_{uid}_{data['service_id']}_{quantity}_{link}")
-        if existing:
-            self.db.set_state(uid, "")
+            return self.deliver(uid, "Phiên đặt hàng không hợp lệ.",
+                                keyboard(((self.t(uid, "back_engagement"), "tools:engagement"),)))
+        try:
+            claimed = self.db.claim_state(uid, "tg_member_confirm")
+        except Exception:
+            LOG.exception("Không claim được state đặt đơn uid=%s", uid)
+            return self.deliver(uid, self.t(uid, "tg_member_db_busy"),
+                                keyboard(((self.t(uid, "back_engagement"), "tools:engagement"),)))
+        if not claimed:
             return self.deliver(uid, self.t(uid, "tg_member_duplicate"),
                                 keyboard(((self.t(uid, "back_engagement"), "tools:engagement"),)))
+        try:
+            self._place_tg_member_order(uid, data)
+        except Exception:
+            LOG.exception("Lỗi không xác định khi đặt đơn provider uid=%s", uid)
+            try:
+                self.db.set_state(uid, "")
+            except Exception:
+                LOG.exception("Không xoá được state uid=%s", uid)
+            self.deliver(uid, self.t(uid, "tg_member_timeout"),
+                         keyboard(((self.t(uid, "back_engagement"), "tools:engagement"),)))
+            self.admins_notify(f"⚠️ Lỗi hệ thống khi đặt đơn provider cho user <code>{uid}</code>. "
+                               f"Kiểm tra log (không chứa token) và đối soát panel.")
 
-        # Deduct balance atomically
-        with self.db.transaction():
-            # Verify balance again inside transaction
-            user_check = self.db.get_user(uid)
-            if user_check["balance"] < total:
-                return self.deliver(uid, self.t(uid, "tg_member_insufficient_balance", need=total, have=user_check["balance"]),
-                                    keyboard(((self.t(uid, "cancel"), "tools:engagement"),)))
-            self.db.conn.execute("UPDATE users SET balance = balance - ? WHERE user_id = ?", (total, uid))
-            self.db.conn.execute(
-                "INSERT INTO ledger(user_id, delta, kind, reference, created_at) VALUES (?, ?, ?, ?, ?)",
-                (uid, -total, "provider_order", f"vietnamfb:{data['service_id']}:{quantity}", utcnow()),
+    def _place_tg_member_order(self, uid, data):
+        if not self.provider:
+            self.db.set_state(uid, "")
+            return self.deliver(uid, self.t(uid, "tg_member_unavailable"),
+                                keyboard(((self.t(uid, "back_engagement"), "tools:engagement"),)))
+        svc = self.provider.get_service(data.get("service_id", ""))
+        tool_service = self.db.get_service_by_title("Tool Access")
+        if not svc or not tool_service:
+            self.db.set_state(uid, "")
+            return self.deliver(uid, self.t(uid, "tg_member_unavailable"),
+                                keyboard(((self.t(uid, "back_engagement"), "tools:engagement"),)))
+        try:
+            quantity = int(data["quantity"])
+            total = int(data["total"])
+            link = str(data["link"])
+            unit_price_milli = int(data.get("unit_price_milli", 0))
+            api_price_milli = int(data.get("api_price_milli", 0))
+            markup_percent = int(data.get("markup_percent", 0))
+        except (KeyError, TypeError, ValueError):
+            self.db.set_state(uid, "")
+            return self.deliver(uid, "Phiên đặt hàng không hợp lệ.",
+                                keyboard(((self.t(uid, "back_engagement"), "tools:engagement"),)))
+        if total <= 0 or quantity <= 0 or not link:
+            self.db.set_state(uid, "")
+            return self.deliver(uid, "Phiên đặt hàng không hợp lệ.",
+                                keyboard(((self.t(uid, "back_engagement"), "tools:engagement"),)))
+
+        request_key = f"tgprov:{data.get('nonce') or secrets.token_hex(8)}"
+        try:
+            outcome, order = self.db.begin_provider_order(
+                user_id=uid,
+                service_id=tool_service["id"],
+                request_key=request_key,
+                subject=f"vietnamfb:{svc.service_id}",
+                evidence=f"link={link};qty={quantity}",
+                amount=total,
             )
+        except Exception:
+            # The COMMIT response may have been lost.  The unique request_key
+            # lets us recover the order instead of debiting twice on retry.
+            LOG.exception("Lỗi tạo order nội bộ uid=%s; kiểm tra request_key", uid)
+            try:
+                recovered = self.db.one("SELECT * FROM orders WHERE request_key=?",
+                                        (request_key,))
+            except Exception:
+                recovered = None
+            if recovered is None:
+                raise
+            outcome, order = "ok", recovered
+        if outcome == "duplicate":
+            return self.deliver(uid, self.t(uid, "tg_member_duplicate"),
+                                keyboard(((self.t(uid, "back_engagement"), "tools:engagement"),)))
+        if outcome == "insufficient":
+            balance = self.db.get_user(uid)["balance"]
+            return self.deliver(uid, self.t(uid, "tg_member_insufficient_balance",
+                                               need=total, have=balance),
+                                keyboard(((self.t(uid, "cancel"), "tools:engagement"),)))
+        if outcome != "ok" or not order:
+            self.db.set_state(uid, "")
+            return self.deliver(uid, "Phiên đặt hàng không hợp lệ.",
+                                keyboard(((self.t(uid, "back_engagement"), "tools:engagement"),)))
 
         self.deliver(uid, self.t(uid, "tg_member_placing"))
 
-        # Place order via provider API
         try:
             result = self.provider.add_order(
-                service_id=data["service_id"],
+                service_id=svc.service_id,
                 link=link,
                 quantity=quantity,
             )
-            provider_order_id = result.order_id
+        except VietnamFBError as exc:
+            self._handle_provider_failure(uid, order, data, svc, exc)
+            return
+        except Exception as exc:
+            LOG.exception("Lỗi không xác định từ provider uid=%s order=%s", uid, order["id"])
+            self._handle_provider_failure(uid, order, data, svc,
+                                          VietnamFBError(f"Unexpected: {exc}", definitive=False))
+            return
 
-            # Save provider order details
-            self.db.create_provider_order(
-                user_id=uid,
-                service_id=svc.category_id == "18" and 4 or 0,  # Tool Access service ID
-                provider_name="vietnamfb",
-                provider_service_id=data["service_id"],
-                provider_order_id=provider_order_id,
-                quantity=quantity,
-                link=link,
-                unit_price_milli=unit_price_milli,
-                markup_percent=markup_percent,
-                api_price_per_1000_milli=api_price_milli,
-                amount=total,
-            )
+        provider_order_id = str(getattr(result, "order_id", "") or "")
+        if not provider_order_id:
+            self._handle_provider_failure(
+                uid, order, data, svc,
+                VietnamFBError("Provider không trả về order id", definitive=False))
+            return
 
+        saved = None
+        for attempt in range(3):
+            try:
+                saved = self.db.attach_provider_order(
+                    order_id=order["id"],
+                    provider_name="vietnamfb",
+                    provider_service_id=svc.service_id,
+                    provider_order_id=provider_order_id,
+                    quantity=quantity,
+                    link=link,
+                    unit_price_milli=unit_price_milli,
+                    markup_percent=markup_percent,
+                    api_price_per_1000_milli=api_price_milli,
+                    api_response={"order": provider_order_id,
+                                  "status": getattr(result, "status", "")},
+                )
+                break
+            except Exception:
+                LOG.exception("Chưa lưu được provider order %s (lần %s) cho order #%s",
+                              provider_order_id, attempt + 1, order["id"])
+                if attempt < 2:
+                    time.sleep(0.5 * (attempt + 1))
+
+        if saved is not None:
             self.db.set_state(uid, "")
             self.deliver(uid, self.t(uid, "tg_member_success",
                 provider_order_id=provider_order_id,
@@ -475,25 +559,74 @@ class App:
                 quantity=quantity,
                 total=total),
                 keyboard(((self.t(uid, "back_engagement"), "tools:engagement"),)))
+            return
 
-        except VietnamFBError as e:
-            LOG.error("Provider API error placing order: %s", e)
-            # Refund on API error
-            with self.db.transaction():
-                self.db.conn.execute("UPDATE users SET balance = balance + ? WHERE user_id = ?", (total, uid))
-                self.db.conn.execute(
-                    "INSERT INTO ledger(user_id, delta, kind, reference, created_at) VALUES (?, ?, ?, ?, ?)",
-                    (uid, total, "refund", f"vietnamfb_failed:{data['service_id']}:{quantity}", utcnow()),
+        # Provider already accepted the order but the DB write failed: never
+        # refund blindly. Keep the debit and alert admins for reconciliation.
+        self._provider_pending(
+            uid, order, data, svc,
+            f"Provider đã nhận đơn {provider_order_id} nhưng chưa lưu được vào DB",
+        )
+
+    def _handle_provider_failure(self, uid, order, data, svc, exc):
+        if getattr(exc, "definitive", False):
+            try:
+                refunded = self.db.reject_order(order["id"])
+            except Exception:
+                LOG.exception("Không hoàn được tiền cho order #%s", order["id"])
+                try:
+                    refreshed = self.db.get_order(order["id"])
+                except Exception:
+                    refreshed = None
+                if refreshed is not None and refreshed["status"] == "rejected":
+                    refunded = refreshed
+                else:
+                    self._provider_pending(uid, order, data, svc,
+                                           f"Lỗi hoàn tiền sau khi provider từ chối: {exc}")
+                    return
+            try:
+                self.db.set_state(uid, "")
+            except Exception:
+                LOG.exception("Không xoá được state uid=%s", uid)
+            if refunded is not None:
+                self.deliver(uid, self.t(uid, "tg_member_failed", error=esc(str(exc))[:300]),
+                             keyboard(((self.t(uid, "back_engagement"), "tools:engagement"),)))
+                self.admins_notify(
+                    f"Đơn provider <b>#{order['id']}</b> bị từ chối, đã hoàn "
+                    f"<b>{money(int(order['amount']))}</b> cho user <code>{uid}</code>.\n"
+                    f"Lý do: {esc(str(exc))[:300]}"
                 )
-            self.db.set_state(uid, "")
-            self.deliver(uid, self.t(uid, "tg_member_failed", error=str(e)),
-                         keyboard(((self.t(uid, "back_engagement"), "tools:engagement"),)))
+            else:
+                self.deliver(uid, self.t(uid, "tg_member_duplicate"),
+                             keyboard(((self.t(uid, "back_engagement"), "tools:engagement"),)))
+            return
+        self._provider_pending(uid, order, data, svc, str(exc))
 
-        except Exception as e:
-            LOG.exception("Unexpected error placing order: %s", e)
+    def _provider_pending(self, uid, order, data, svc, reason):
+        """Provider result ambiguous: keep debit, flag reconciliation, alert admin."""
+        try:
+            self.db.mark_order_pending_reconciliation(order["id"])
+        except Exception:
+            LOG.exception("Không đánh dấu được order #%s là chờ đối soát", order["id"])
+        try:
             self.db.set_state(uid, "")
-            self.deliver(uid, self.t(uid, "tg_member_timeout"),
-                         keyboard(((self.t(uid, "back_engagement"), "tools:engagement"),)))
+        except Exception:
+            LOG.exception("Không xoá được state uid=%s", uid)
+        self.deliver(uid, self.t(uid, "tg_member_pending_reconcile", order_id=order["id"]),
+                     keyboard(((self.t(uid, "back_engagement"), "tools:engagement"),)))
+        link = str(data.get("link", ""))
+        quantity = data.get("quantity", 0)
+        self.admins_notify(
+            f"⚠️ <b>Đơn cần đối soát</b>\n"
+            f"Mã nội bộ: <b>#{order['id']}</b>\n"
+            f"User: <code>{uid}</code>\n"
+            f"Dịch vụ: {esc(svc.name)} (#{esc(svc.service_id)})\n"
+            f"Link: {esc(link)}\n"
+            f"Số lượng: {quantity}\n"
+            f"Đã trừ: <b>{money(int(order['amount']))}</b>\n"
+            f"Lý do: {esc(str(reason))[:300]}\n"
+            f"Kiểm tra panel provider. Nếu provider chưa nhận đơn, hoàn tiền bằng /reject {order['id']}."
+        )
 
     def tool_subscription(self, uid):
         records = self.db.list_tool_orders(uid)
@@ -874,7 +1007,8 @@ class App:
                               unit_price_milli=int(selling_price_per_1000 * 1000),  # milli VND
                               api_price_milli=int(svc.price_per_1000 * 1000),
                               markup_percent=markup_percent,
-                              total=total_int)
+                              total=total_int,
+                              nonce=secrets.token_hex(8))
             # Format for display
             language = self.lang(uid)
             if language == "en":
@@ -1175,13 +1309,19 @@ class App:
                     except Exception:
                         LOG.exception("Lỗi xử lý update_id=%s", update["update_id"])
                     finally:
-                        self.db.set_setting("poll_offset", str(self.offset))
+                        try:
+                            self.db.set_setting("poll_offset", str(self.offset))
+                        except Exception:
+                            LOG.exception("Không lưu được poll_offset; tiếp tục với offset trong bộ nhớ")
             except (ApiError, OSError):
                 LOG.exception("Lỗi polling; sẽ thử lại")
                 time.sleep(min(retry, 30))
                 retry *= 2
+        LOG.info("Polling đã dừng")
 
     def stop(self, *_):
+        if self.running:
+            LOG.info("Nhận tín hiệu dừng; đang kết thúc an toàn")
         self.running = False
 
 
