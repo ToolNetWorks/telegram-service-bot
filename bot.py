@@ -554,8 +554,9 @@ class App:
         if saved is not None:
             self.db.set_state(uid, "")
             self.deliver(uid, self.t(uid, "tg_member_success",
-                provider_order_id=provider_order_id,
+                order_id=order["id"],
                 service_name=svc.name,
+                link=link,
                 quantity=quantity,
                 total=total),
                 keyboard(((self.t(uid, "back_engagement"), "tools:engagement"),)))
@@ -982,13 +983,35 @@ class App:
             self.db.set_state(uid, "tg_member_qty", **data, link=value)
             return self.deliver(uid, self.t(uid, "tg_member_enter_qty", min_qty=svc.min_quantity, max_qty=svc.max_quantity))
         if state == "tg_member_qty":
-            if not value.isdigit():
-                return self.deliver(uid, self.t(uid, "tg_member_invalid_qty", min_qty=data["min_qty"], max_qty=data["max_qty"]))
-            qty = int(value)
             svc = self.provider.get_service(data["service_id"])
-            if not svc or qty < svc.min_quantity or qty > svc.max_quantity:
-                return self.deliver(uid, self.t(uid, "tg_member_invalid_qty", min_qty=svc.min_quantity, max_qty=svc.max_qty))
-            # Calculate total price
+            if not svc:
+                return self.deliver(uid, "Service not found.", self.back(uid))
+            
+            # Professional quantity validation
+            min_qty = svc.min_quantity
+            max_qty = svc.max_quantity
+            
+            # Check if value is a valid positive integer
+            if not value.strip().isdigit():
+                return self.deliver(uid, self.t(uid, "tg_member_qty_invalid_format", min_qty=min_qty, max_qty=max_qty))
+            
+            qty = int(value.strip())
+            
+            # Check for zero
+            if qty == 0:
+                return self.deliver(uid, self.t(uid, "tg_member_qty_zero", service_name=svc.name, min_qty=min_qty, max_qty=max_qty))
+            
+            # Check below minimum
+            if qty < min_qty:
+                return self.deliver(uid, self.t(uid, "tg_member_qty_below_min", 
+                    service_name=svc.name, quantity=qty, min_qty=min_qty, max_qty=max_qty))
+            
+            # Check above maximum
+            if qty > max_qty:
+                return self.deliver(uid, self.t(uid, "tg_member_qty_above_max", 
+                    service_name=svc.name, quantity=qty, min_qty=min_qty, max_qty=max_qty))
+            
+            # Quantity is valid - calculate total price
             api_price_per_1000 = svc.price_per_1000
             markup_percent = self.db.get_markup_percent()
             selling_price_per_1000 = (api_price_per_1000 * Decimal(100 + markup_percent) / Decimal(100)).quantize(
@@ -1002,6 +1025,7 @@ class App:
             if total_int > balance:
                 return self.deliver(uid, self.t(uid, "tg_member_insufficient_balance", need=total_int, have=balance),
                                     keyboard(((self.t(uid, "cancel"), "tools:engagement"),)))
+            
             # Store confirmation data
             self.db.set_state(uid, "tg_member_confirm", **data, quantity=qty,
                               unit_price_milli=int(selling_price_per_1000 * 1000),  # milli VND
@@ -1009,17 +1033,13 @@ class App:
                               markup_percent=markup_percent,
                               total=total_int,
                               nonce=secrets.token_hex(8))
-            # Format for display
-            language = self.lang(uid)
-            if language == "en":
-                unit_price_str = f"{selling_price_per_1000:,.3f}".replace(",", " ")
-            else:
-                unit_price_str = f"{selling_price_per_1000:,.3f}".replace(",", " ").replace(".", ",")
-            self.deliver(uid, self.t(uid, "tg_member_confirm",
-                service_name=svc.name, service_id=svc.service_id,
-                link=data["link"], quantity=qty,
-                unit_price=unit_price_str, total=total_int,
-                balance=balance),
+            
+            # Show professional confirmation with [Xác nhận đặt hàng] [Hủy] buttons
+            self.deliver(uid, self.t(uid, "tg_member_qty_valid",
+                service_name=svc.name,
+                link=esc(data["link"]),
+                quantity=qty,
+                total=total_int),
                 keyboard(((self.t(uid, "confirm_pay"), "tg_member_confirm_pay"), (self.t(uid, "cancel"), "tools:engagement"))))
             return
         if state == "tg_member_confirm":

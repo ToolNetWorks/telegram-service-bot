@@ -626,6 +626,128 @@ class FlowTests(unittest.TestCase):
         state, _ = self.app.db.get_state(333)
         self.assertEqual(state, "tg_member_link")
 
+    def test_telegram_members_qty_invalid_format(self):
+        """Test ordering with non-numeric quantity."""
+        self.onboard(uid=343)
+        self.cb(343, "tools")
+        self.cb(343, "tools:engagement")
+        self.cb(343, "engagement:telegram_members")
+        self.cb(343, "tg_member_select:1720")
+        self.msg(343, "https://t.me/testgroup")
+
+        # Enter non-numeric quantity
+        self.msg(343, "abc")
+        texts = [c[2] for c in self.app.api.calls if c[0] == "sendMessage"]
+        self.assertTrue(any("số lượng không hợp lệ" in t.lower() or "invalid quantity" in t.lower() for t in texts))
+        state, _ = self.app.db.get_state(343)
+        self.assertEqual(state, "tg_member_qty")
+
+    def test_telegram_members_qty_zero(self):
+        """Test ordering with zero quantity."""
+        self.onboard(uid=344)
+        self.cb(344, "tools")
+        self.cb(344, "tools:engagement")
+        self.cb(344, "engagement:telegram_members")
+        self.cb(344, "tg_member_select:1720")
+        self.msg(344, "https://t.me/testgroup")
+
+        # Enter zero quantity
+        self.msg(344, "0")
+        texts = [c[2] for c in self.app.api.calls if c[0] == "sendMessage"]
+        self.assertTrue(any("số lượng không hợp lệ" in t.lower() or "invalid quantity" in t.lower() for t in texts))
+        state, _ = self.app.db.get_state(344)
+        self.assertEqual(state, "tg_member_qty")
+
+    def test_telegram_members_qty_negative(self):
+        """Test ordering with negative quantity."""
+        self.onboard(uid=345)
+        self.cb(345, "tools")
+        self.cb(345, "tools:engagement")
+        self.cb(345, "engagement:telegram_members")
+        self.cb(345, "tg_member_select:1720")
+        self.msg(345, "https://t.me/testgroup")
+
+        # Enter negative quantity
+        self.msg(345, "-10")
+        texts = [c[2] for c in self.app.api.calls if c[0] == "sendMessage"]
+        self.assertTrue(any("số lượng không hợp lệ" in t.lower() or "invalid quantity" in t.lower() for t in texts))
+        state, _ = self.app.db.get_state(345)
+        self.assertEqual(state, "tg_member_qty")
+
+    def test_telegram_members_qty_decimal(self):
+        """Test ordering with decimal quantity."""
+        self.onboard(uid=346)
+        self.cb(346, "tools")
+        self.cb(346, "tools:engagement")
+        self.cb(346, "engagement:telegram_members")
+        self.cb(346, "tg_member_select:1720")
+        self.msg(346, "https://t.me/testgroup")
+
+        # Enter decimal quantity
+        self.msg(346, "10.5")
+        texts = [c[2] for c in self.app.api.calls if c[0] == "sendMessage"]
+        self.assertTrue(any("số lượng không hợp lệ" in t.lower() or "invalid quantity" in t.lower() for t in texts))
+        state, _ = self.app.db.get_state(346)
+        self.assertEqual(state, "tg_member_qty")
+
+    def test_telegram_members_qty_below_min(self):
+        """Test ordering with quantity below minimum."""
+        self.onboard(uid=347)
+        self.cb(347, "tools")
+        self.cb(347, "tools:engagement")
+        self.cb(347, "engagement:telegram_members")
+        self.cb(347, "tg_member_select:1720")
+        self.msg(347, "https://t.me/testgroup")
+
+        # Enter quantity below min (service 1720 has min=10)
+        self.msg(347, "5")
+        texts = [c[2] for c in self.app.api.calls if c[0] == "sendMessage"]
+        self.assertTrue(any("số lượng không hợp lệ" in t.lower() or "invalid quantity" in t.lower() for t in texts))
+        state, _ = self.app.db.get_state(347)
+        self.assertEqual(state, "tg_member_qty")
+
+    def test_telegram_members_qty_above_max(self):
+        """Test ordering with quantity above maximum."""
+        self.onboard(uid=348)
+        self.cb(348, "tools")
+        self.cb(348, "tools:engagement")
+        self.cb(348, "engagement:telegram_members")
+        self.cb(348, "tg_member_select:1720")
+        self.msg(348, "https://t.me/testgroup")
+
+        # Enter quantity above max (service 1720 has max=1000000)
+        self.msg(348, "2000000")
+        texts = [c[2] for c in self.app.api.calls if c[0] == "sendMessage"]
+        self.assertTrue(any("số lượng không hợp lệ" in t.lower() or "invalid quantity" in t.lower() for t in texts))
+        state, _ = self.app.db.get_state(348)
+        self.assertEqual(state, "tg_member_qty")
+
+    def test_telegram_members_qty_valid_shows_confirmation(self):
+        """Test valid quantity shows professional confirmation with buttons."""
+        self.onboard(uid=349)
+        # Give user enough balance
+        self.app.db.conn.execute("UPDATE users SET balance = ? WHERE user_id = ?", (50000, 349))
+        
+        self.cb(349, "tools")
+        self.cb(349, "tools:engagement")
+        self.cb(349, "engagement:telegram_members")
+        self.cb(349, "tg_member_select:1720")
+        self.msg(349, "https://t.me/testgroup")
+
+        # Enter valid quantity
+        self.msg(349, "1000")
+        texts = [c[2] for c in self.app.api.calls if c[0] == "sendMessage"]
+        # Should show "THÔNG TIN HỢP LỆ" confirmation
+        self.assertTrue(any("thông tin hợp lệ" in t.lower() or "valid information" in t.lower() for t in texts))
+        # Should have confirm and cancel buttons
+        calls = [c for c in self.app.api.calls if c[0] == "sendMessage" and len(c) > 3 and c[3] is not None]
+        self.assertTrue(len(calls) > 0, "Expected a sendMessage call with reply_markup")
+        last_call = calls[-1]
+        markup = last_call[3]  # 4th element is markup
+        self.assertTrue(len(markup["inline_keyboard"]) > 0)
+        state, _ = self.app.db.get_state(349)
+        self.assertEqual(state, "tg_member_confirm")
+
 
 if __name__ == "__main__":
     unittest.main()

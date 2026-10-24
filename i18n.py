@@ -34,35 +34,49 @@ EN = {
     "tg_member_select": "Select a Telegram Group Members package:",
     "tg_member_enter_link": "Enter the public Telegram Group link (e.g., https://t.me/groupname or @groupname):",
     "tg_member_enter_qty": "Enter quantity of members to add (min {min_qty}, max {max_qty}):",
-    "tg_member_invalid_link": "Invalid Telegram group link. Use https://t.me/... or @username format.",
-    "tg_member_invalid_qty": "Invalid quantity. Must be a number between {min_qty} and {max_qty}.",
-    "tg_member_confirm": "<b>Confirm Order</b>\n\n"
-                          "Service: <b>{service_name}</b> (ID: <code>{service_id}</code>)\n"
-                          "Group: <b>{link}</b>\n"
-                          "Quantity: <b>{quantity:,}</b> members\n"
-                          "Unit price: <b>{unit_price} VND</b> per 1,000 members\n"
-                          "Total: <b>{total:,} VND</b>\n"
-                          "Your balance: <b>{balance:,} VND</b>\n\n"
-                          "Press <b>Confirm</b> to pay from wallet and place order via provider.",
-    "tg_member_insufficient_balance": "Insufficient balance. Need <b>{need:,} VND</b>, you have <b>{have:,} VND</b>. Please deposit first.",
-    "tg_member_placing": "Placing order via provider...",
-    "tg_member_success": "Order placed successfully!\n\n"
-                          "Provider Order ID: <code>{provider_order_id}</code>\n"
-                          "Service: <b>{service_name}</b>\n"
-                          "Quantity: <b>{quantity:,}</b> members\n"
-                          "Total charged: <b>{total:,} VND</b>\n\n"
-                          "Track status in <b>My Orders</b>.",
-    "tg_member_failed": "Failed to place order: {error}\n\n"
-                         "If money was deducted, it will be refunded automatically.",
-    "tg_member_api_error": "Provider API error: {error}",
-    "tg_member_timeout": "Provider request timed out. Order status unknown. Please check My Orders or contact support.",
-    "tg_member_duplicate": "Duplicate order detected. Please check My Orders.",
-    "tg_member_link_group_only": "This service supports Telegram Groups only. Please provide a group link.",
-    "tg_member_pending_reconcile": "The provider result could not be confirmed yet. Your order <b>#{order_id}</b> is kept for reconciliation and the charge is on hold. Support will verify it shortly.",
-    "tg_member_db_busy": "The system is temporarily busy. Please try again in a few seconds.",
-    "tg_member_unavailable": "This service is temporarily unavailable. You have not been charged. Please try again later.",
-    "confirm_pay": "Confirm & Pay",
-    "cancel": "Cancel",
+    "tg_member_invalid_link": "❌ <b>INVALID LINK</b>\n\nTelegram group link format is incorrect.\n💡 Use format: <code>https://t.me/groupname</code> or <code>@groupname</code>",
+    
+    # Professional quantity validation messages
+    "tg_member_qty_invalid_format": "❌ <b>INVALID QUANTITY</b>\n\nQuantity must be a positive integer (e.g., 10, 100, 1000).\n💡 Please enter a quantity from {min_qty} to {max_qty}.",
+    "tg_member_qty_below_min": "❌ <b>INVALID QUANTITY</b>\n\nRequested quantity is below the service minimum.\n\n📦 Service: {service_name}\n🔢 Entered quantity: {quantity}\n📉 Minimum: {min_qty}\n📈 Maximum: {max_qty}\n\n💡 Please enter a quantity from {min_qty} to {max_qty} to continue.",
+    "tg_member_qty_above_max": "❌ <b>INVALID QUANTITY</b>\n\nRequested quantity exceeds the service maximum.\n\n📦 Service: {service_name}\n🔢 Entered quantity: {quantity}\n📉 Minimum: {min_qty}\n📈 Maximum: {max_qty}\n\n💡 Please enter a quantity from {min_qty} to {max_qty} to continue.",
+    "tg_member_qty_zero": "❌ <b>INVALID QUANTITY</b>\n\nQuantity must be greater than 0.\n\n📦 Service: {service_name}\n📉 Minimum: {min_qty}\n📈 Maximum: {max_qty}\n\n💡 Please enter a quantity from {min_qty} to {max_qty}.",
+    
+    # Valid quantity confirmation
+    "tg_member_qty_valid": "✅ <b>VALID INFORMATION</b>\n\nRequested quantity has been confirmed.\n\n📦 Service: {service_name}\n🔗 Link: {link}\n👥 Quantity: {quantity}\n💰 Total payment: {total:,} VND\n\nPlease review the information before confirming the order.",
+    
+    # Insufficient balance
+    "tg_member_insufficient_balance": "⚠️ <b>INSUFFICIENT BALANCE</b>\n\nYour wallet does not have enough funds for this order.\n\n💰 Required: {need:,} VND\n💵 Available: {have:,} VND\n\n💡 Please add funds to your wallet to continue.",
+    
+    # Order placement
+    "tg_member_placing": "⏳ Placing order via provider...",
+    
+    # Success - only when provider confirms
+    "tg_member_success": "✅ <b>ORDER PLACED SUCCESSFULLY!</b>\n\nOrder has been accepted and forwarded to processing system.\n\n🧾 Order ID: {order_id}\n📦 Service: {service_name}\n🔗 Link: {link}\n👥 Quantity: {quantity}\n💰 Payment: {total:,} VND\n🔄 Status: Processing\n\nThank you for using ToolNet Services!",
+    
+    # Definitive provider error - refund done
+    "tg_member_failed": "⚠️ <b>UNABLE TO CONFIRM ORDER</b>\n\nSystem encountered an issue connecting to provider.\n\n🔄 Order will be reviewed before next action.\n💡 Please do not resubmit multiple times.\n\n📝 Details: {error}",
+    
+    # Provider API error
+    "tg_member_api_error": "⚠️ <b>UNABLE TO CONFIRM ORDER</b>\n\nError connecting to service provider.\n\n💡 Please try again later or contact support.\n📝 Details: {error}",
+    
+    # Timeout/ambiguous
+    "tg_member_timeout": "⚠️ <b>UNABLE TO CONFIRM ORDER</b>\n\nProvider request timed out. Order status unknown.\n\n💡 Please check <b>My Orders</b> or contact support. Do not resubmit multiple times.",
+    
+    # Duplicate detection
+    "tg_member_duplicate": "⚠️ <b>DUPLICATE ORDER DETECTED</b>\n\nYou may have pressed confirm twice. System only processes one order.\n\n💡 Please check <b>My Orders</b>.",
+    
+    "tg_member_link_group_only": "❌ <b>SERVICE SUPPORTS GROUPS ONLY</b>\n\nThis service only supports Telegram Groups. Please provide a group link.",
+    
+    # Pending reconciliation
+    "tg_member_pending_reconcile": "⏳ <b>ORDER PENDING RECONCILIATION</b>\n\nProvider result could not be confirmed yet. Order <b>#{order_id}</b> is held for reconciliation and charge is on hold. Support will verify shortly.",
+    
+    "tg_member_db_busy": "⏳ <b>SYSTEM BUSY</b>\n\nPlease try again in a few seconds.",
+    
+    "tg_member_unavailable": "⚠️ <b>SERVICE TEMPORARILY UNAVAILABLE</b>\n\nYou have not been charged. Please try again later.",
+    
+    "confirm_pay": "✅ Confirm Order",
+    "cancel": "❌ Cancel",
     "choose_language": "Verified!\n\nWelcome to our community!\nChoose your language below to get started.",
     "choose_platform": "Select the platform for your policy-compliance request.",
     "choose_service": "Select a service to open a case.",
@@ -114,35 +128,49 @@ VI = {
     "tg_member_select": "Chọn gói thành viên Telegram Group:",
     "tg_member_enter_link": "Nhập link Telegram Group công khai (vd: https://t.me/tennhom hoặc @tennhom):",
     "tg_member_enter_qty": "Nhập số lượng member cần thêm (tối thiểu {min_qty}, tối đa {max_qty}):",
-    "tg_member_invalid_link": "Link nhóm Telegram không hợp lệ. Dùng dạng https://t.me/... hoặc @username.",
-    "tg_member_invalid_qty": "Số lượng không hợp lệ. Phải là số từ {min_qty} đến {max_qty}.",
-    "tg_member_confirm": "<b>Xác nhận đặt hàng</b>\n\n"
-                          "Dịch vụ: <b>{service_name}</b> (ID: <code>{service_id}</code>)\n"
-                          "Nhóm: <b>{link}</b>\n"
-                          "Số lượng: <b>{quantity:,}</b> member\n"
-                          "Đơn giá: <b>{unit_price} VND</b> / 1.000 member\n"
-                          "Tổng cộng: <b>{total:,} VND</b>\n"
-                          "Số dư hiện tại: <b>{balance:,} VND</b>\n\n"
-                          "Nhấn <b>Xác nhận</b> để thanh toán từ ví và đặt hàng qua nhà cung cấp.",
-    "tg_member_insufficient_balance": "Số dư không đủ. Cần <b>{need:,} VND</b>, bạn có <b>{have:,} VND</b>. Hãy nạp tiền trước.",
-    "tg_member_placing": "Đang đặt hàng qua nhà cung cấp...",
-    "tg_member_success": "Đặt hàng thành công!\n\n"
-                          "Provider Order ID: <code>{provider_order_id}</code>\n"
-                          "Dịch vụ: <b>{service_name}</b>\n"
-                          "Số lượng: <b>{quantity:,}</b> member\n"
-                          "Đã trừ: <b>{total:,} VND</b>\n\n"
-                          "Theo dõi trạng thái ở <b>Đơn của tôi</b>.",
-    "tg_member_failed": "Đặt hàng thất bại: {error}\n\n"
-                         "Nếu đã trừ tiền, hệ thống sẽ hoàn trả tự động.",
-    "tg_member_api_error": "Lỗi API nhà cung cấp: {error}",
-    "tg_member_timeout": "Yêu cầu tới nhà cung cấp hết thời gian. Trạng thái đơn chưa rõ. Kiểm tra <b>Đơn của tôi</b> hoặc liên hệ hỗ trợ.",
-    "tg_member_duplicate": "Phát hiện đơn trùng lặp. Vui lòng kiểm tra <b>Đơn của tôi</b>.",
-    "tg_member_link_group_only": "Dịch vụ này chỉ hỗ trợ Telegram Group. Vui lòng cung cấp link nhóm.",
-    "tg_member_pending_reconcile": "Chưa xác nhận được kết quả từ nhà cung cấp. Đơn <b>#{order_id}</b> đã được giữ để đối soát và khoản trừ đang tạm giữ. Bộ phận hỗ trợ sẽ kiểm tra ngay.",
-    "tg_member_db_busy": "Hệ thống đang bận tạm thời. Vui lòng thử lại sau vài giây.",
-    "tg_member_unavailable": "Dịch vụ tạm thời không khả dụng. Bạn chưa bị trừ tiền. Vui lòng thử lại sau.",
-    "confirm_pay": "Xác nhận & Thanh toán",
-    "cancel": "Hủy",
+    "tg_member_invalid_link": "❌ <b>LINK KHÔNG HỢP LỆ</b>\n\nLink nhóm Telegram không đúng định dạng.\n💡 Dùng dạng: <code>https://t.me/tennhom</code> hoặc <code>@tennhom</code>",
+    
+    # Professional quantity validation messages
+    "tg_member_qty_invalid_format": "❌ <b>SỐ LƯỢNG KHÔNG HỢP LỆ</b>\n\nSố lượng phải là số nguyên dương (ví dụ: 10, 100, 1000).\n💡 Vui lòng nhập lại số lượng từ {min_qty} đến {max_qty}.",
+    "tg_member_qty_below_min": "❌ <b>SỐ LƯỢNG KHÔNG HỢP LỆ</b>\n\nSố lượng yêu cầu chưa đạt mức tối thiểu của dịch vụ.\n\n📦 Dịch vụ: {service_name}\n🔢 Số lượng đã nhập: {quantity}\n📉 Tối thiểu: {min_qty}\n📈 Tối đa: {max_qty}\n\n💡 Vui lòng nhập lại số lượng từ {min_qty} đến {max_qty} để tiếp tục.",
+    "tg_member_qty_above_max": "❌ <b>SỐ LƯỢNG KHÔNG HỢP LỆ</b>\n\nSố lượng yêu cầu vượt quá mức tối đa của dịch vụ.\n\n📦 Dịch vụ: {service_name}\n🔢 Số lượng đã nhập: {quantity}\n📉 Tối thiểu: {min_qty}\n📈 Tối đa: {max_qty}\n\n💡 Vui lòng nhập lại số lượng từ {min_qty} đến {max_qty} để tiếp tục.",
+    "tg_member_qty_zero": "❌ <b>SỐ LƯỢNG KHÔNG HỢP LỆ</b>\n\nSố lượng phải lớn hơn 0.\n\n📦 Dịch vụ: {service_name}\n📉 Tối thiểu: {min_qty}\n📈 Tối đa: {max_qty}\n\n💡 Vui lòng nhập lại số lượng từ {min_qty} đến {max_qty}.",
+    
+    # Valid quantity confirmation
+    "tg_member_qty_valid": "✅ <b>THÔNG TIN HỢP LỆ</b>\n\nSố lượng yêu cầu đã được xác nhận.\n\n📦 Dịch vụ: {service_name}\n🔗 Liên kết: {link}\n👥 Số lượng: {quantity}\n💰 Tổng thanh toán: {total:,} VNĐ\n\nVui lòng kiểm tra thông tin trước khi xác nhận đặt hàng.",
+    
+    # Insufficient balance
+    "tg_member_insufficient_balance": "⚠️ <b>SỐ DƯ KHÔNG ĐỦ</b>\n\nVí của bạn không đủ để thanh toán đơn hàng này.\n\n💰 Cần: {need:,} VNĐ\n💵 Hiện có: {have:,} VNĐ\n\n💡 Vui lòng nạp thêm tiền vào ví để tiếp tục.",
+    
+    # Order placement
+    "tg_member_placing": "⏳ Đang đặt hàng qua nhà cung cấp...",
+    
+    # Success - only when provider confirms
+    "tg_member_success": "✅ <b>ĐẶT HÀNG THÀNH CÔNG!</b>\n\nĐơn hàng đã được tiếp nhận và chuyển đến hệ thống xử lý.\n\n🧾 Mã đơn: {order_id}\n📦 Dịch vụ: {service_name}\n🔗 Liên kết: {link}\n👥 Số lượng: {quantity}\n💰 Thanh toán: {total:,} VNĐ\n🔄 Trạng thái: Đang xử lý\n\nCảm ơn bạn đã sử dụng ToolNet Services!",
+    
+    # Definitive provider error - refund done
+    "tg_member_failed": "⚠️ <b>CHƯA THỂ XÁC NHẬN ĐƠN HÀNG</b>\n\nHệ thống đang gặp sự cố khi kết nối nhà cung cấp.\n\n🔄 Đơn hàng sẽ được kiểm tra trước khi thực hiện thao tác tiếp theo.\n💡 Vui lòng không gửi lại nhiều lần.\n\n📝 Chi tiết: {error}",
+    
+    # Provider API error
+    "tg_member_api_error": "⚠️ <b>CHƯA THỂ XÁC NHẬN ĐƠN HÀNG</b>\n\nLỗi khi kết nối tới nhà cung cấp dịch vụ.\n\n💡 Vui lòng thử lại sau hoặc liên hệ hỗ trợ.\n📝 Chi tiết: {error}",
+    
+    # Timeout/ambiguous
+    "tg_member_timeout": "⚠️ <b>CHƯA THỂ XÁC NHẬN ĐƠN HÀNG</b>\n\nYêu cầu tới nhà cung cấp hết thời gian. Trạng thái đơn chưa rõ.\n\n💡 Vui lòng kiểm tra <b>Đơn của tôi</b> hoặc liên hệ hỗ trợ. Không gửi lại nhiều lần.",
+    
+    # Duplicate detection
+    "tg_member_duplicate": "⚠️ <b>PHÁT HIỆN ĐƠN TRÙNG LẶP</b>\n\nBạn có thể đã bấm xác nhận 2 lần. Hệ thống chỉ xử lý 1 đơn.\n\n💡 Vui lòng kiểm tra <b>Đơn của tôi</b>.",
+    
+    "tg_member_link_group_only": "❌ <b>DỊCH VỤ CHỈ HỖ TRỢ GROUP</b>\n\nDịch vụ này chỉ hỗ trợ Telegram Group. Vui lòng cung cấp link nhóm.",
+    
+    # Pending reconciliation
+    "tg_member_pending_reconcile": "⏳ <b>ĐƠN CHỜ ĐỐI SOÁT</b>\n\nChưa xác nhận được kết quả từ nhà cung cấp. Đơn <b>#{order_id}</b> đã được giữ để đối soát và khoản trừ đang tạm giữ. Bộ phận hỗ trợ sẽ kiểm tra ngay.",
+    
+    "tg_member_db_busy": "⏳ <b>HỆ THỐNG ĐANG BẬN</b>\n\nVui lòng thử lại sau vài giây.",
+    
+    "tg_member_unavailable": "⚠️ <b>DỊCH VỤ TẠM THỜI KHÔNG KHẢ DỤNG</b>\n\nBạn chưa bị trừ tiền. Vui lòng thử lại sau.",
+    
+    "confirm_pay": "✅ Xác nhận đặt hàng",
+    "cancel": "❌ Hủy",
     "choose_language": "Đã xác minh!\n\nChào mừng đến cộng đồng.\nChọn ngôn ngữ để bắt đầu.",
     "choose_platform": "Chọn nền tảng có nội dung cần rà soát vi phạm.",
     "choose_service": "Chọn dịch vụ để tạo hồ sơ.",
@@ -164,7 +192,6 @@ VI = {
     "price_quote": "Báo giá sau khi thẩm định",
     "create": "Tạo hồ sơ", "description": "Chi tiết dịch vụ", "cost": "Chi phí",
 }
-
 
 
 def translate(language: str, key: str, **params) -> str:
