@@ -100,6 +100,7 @@ class HealthResponse(BaseModel):
     status: Literal["healthy", "degraded", "unhealthy"]
     timestamp: datetime
     database: Literal["connected", "disconnected"]
+    database_backend: str
     providers: dict[str, Literal["ok", "error"]]
 
 

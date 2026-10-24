@@ -19,10 +19,11 @@ WORKDIR /app
 COPY apps/engagement-api/requirements.txt /app/requirements.txt
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Copy application code
+# Copy application code AND turso_client from root
 COPY apps/engagement-api/ /app/
+COPY turso_client.py /app/turso_client.py
 
-# Create data directory for SQLite (if used)
+# Create data directory for SQLite (dev/test only)
 RUN mkdir -p /data && chown -R apiuser:apiuser /data /app
 
 # Switch to non-root user
@@ -30,8 +31,7 @@ USER apiuser
 
 # Environment variables
 ENV PYTHONUNBUFFERED=1 \
-    PYTHONDONTWRITEBYTECODE=1 \
-    DB_PATH=/data/engagement.sqlite3
+    PYTHONDONTWRITEBYTECODE=1
 
 # Expose port
 EXPOSE 8000
@@ -40,5 +40,5 @@ EXPOSE 8000
 HEALTHCHECK --interval=30s --timeout=10s --start-period=10s --retries=3 \
     CMD curl -f http://localhost:8000/health || exit 1
 
-# Run the API
-ENTRYPOINT ["python3", "app/main.py"]
+# Run the API with proper module imports
+ENTRYPOINT ["python3", "-m", "app.main"]

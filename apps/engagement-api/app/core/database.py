@@ -22,25 +22,37 @@ LOG = logging.getLogger("engagement.database")
 
 
 class Database:
-    """Database connection supporting both Turso (production) and SQLite (dev/test)."""
+    """Database connection supporting Turso (production) and SQLite (dev/test only)."""
 
     def __init__(self):
-        self.backend = "sqlite"
+        self.backend = "unknown"
         self._conn: Any = None
 
-        if TURSO_AVAILABLE:
+        # Determine if we're in production (Turso required) or dev/test (SQLite allowed)
+        is_production = settings.environment.lower() == "production"
+        # Also consider it production if DATABASE_URL and DATABASE_TOKEN are set
+        has_turso_config = bool(settings.database_url.strip() and settings.database_token.strip())
+
+        if TURSO_AVAILABLE and has_turso_config:
             url = settings.database_url.strip()
             token = settings.database_token.strip()
-            if url and token:
-                try:
-                    self._conn = TursoConnection(url, token)
-                    self.backend = "turso"
-                    LOG.info("Database backend: Turso (remote)")
-                    return
-                except TursoError as exc:
-                    LOG.warning("Turso connection failed, falling back to SQLite: %s", exc)
+            try:
+                self._conn = TursoConnection(url, token)
+                self.backend = "turso"
+                LOG.info("Database backend: Turso (remote)")
+                return
+            except TursoError as exc:
+                LOG.error("Turso connection failed: %s", exc)
+                if is_production:
+                    raise RuntimeError(f"Production requires Turso database. Connection failed: {exc}") from exc
+                LOG.warning("Falling back to SQLite for development")
+        elif has_turso_config and not TURSO_AVAILABLE:
+            raise RuntimeError("Turso client not available but DATABASE_URL/DATABASE_TOKEN are set. Ensure turso_client.py is present.")
 
-        # SQLite fallback
+        # SQLite fallback - ONLY for non-production
+        if is_production:
+            raise RuntimeError("Production environment requires Turso database (DATABASE_URL and DATABASE_TOKEN). SQLite not allowed.")
+
         db_path = os.getenv("DB_PATH", "./data/engagement.sqlite3")
         os.makedirs(os.path.dirname(db_path), exist_ok=True)
         self._conn = sqlite3.connect(db_path, isolation_level=None, timeout=10)

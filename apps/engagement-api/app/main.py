@@ -139,6 +139,7 @@ async def health_check():
         status=overall,
         timestamp=datetime.utcnow(),
         database=db_status,
+        database_backend=db.backend,
         providers=providers,
     )
 
@@ -201,16 +202,10 @@ async def create_order(order: OrderCreate):
     if not svc:
         raise HTTPException(status_code=404, detail="Service not found")
 
-    # Check idempotency
-    existing = db.fetchone("SELECT * FROM provider_orders WHERE idempotency_key=?", (order.idempotency_key,))
-    if existing:
-        return OrderResult(
-            success=True,
-            provider_order_id=existing["provider_order_id"],
-            charge_milli=existing["charge_milli"],
-            status=existing["status"],
-        )
-
+    # Check idempotency - use provider_order_id uniqueness (race condition handled by DB constraint)
+    # We can't check by idempotency_key since it's not in the shared schema.
+    # Instead, Bot Core should ensure idempotency before calling this API.
+    
     # Validate quantity
     if order.quantity < svc["min_quantity"] or order.quantity > svc["max_quantity"]:
         raise HTTPException(
@@ -231,24 +226,30 @@ async def create_order(order: OrderCreate):
     except VietnamFBError as exc:
         return OrderResult(success=False, error=str(exc))
 
-    # Store provider order
-    charge_milli = int(result.charge * 1000) if result.charge else 0
+    # Store provider order - matches migration 001 schema
+    # order_id is NULL initially (Bot Core will link it)
+    # api_price_per_1000_milli = rate_milli (cost from provider)
+    # markup_percent = 0 (Bot Core applies markup)
+    api_price_per_1000_milli = svc["rate_milli"]
     db.execute(
         """INSERT INTO provider_orders(
-            provider_name, provider_service_id, provider_order_id,
-            quantity, link, unit_price_milli, charge_milli,
-            status, idempotency_key, created_at
-        ) VALUES (?,?,?,?,?,?,?,?,?,?)""",
+            order_id, provider_name, provider_service_id, provider_order_id,
+            quantity, link, unit_price_milli, markup_percent,
+            api_price_per_1000_milli, status, api_response, created_at, updated_at
+        ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)""",
         (
+            None,  # order_id - Bot Core will link later
             svc["provider_id"],
             svc["provider_service_id"],
             result.order_id,
             order.quantity,
             order.link,
-            svc["rate_milli"],
-            charge_milli,
+            api_price_per_1000_milli,  # unit_price_milli = provider cost
+            0,  # markup_percent
+            api_price_per_1000_milli,  # api_price_per_1000_milli
             "processing",
-            order.idempotency_key,
+            "{}",  # api_response
+            datetime.utcnow().isoformat(),
             datetime.utcnow().isoformat(),
         ),
     )
@@ -256,7 +257,7 @@ async def create_order(order: OrderCreate):
     return OrderResult(
         success=True,
         provider_order_id=result.order_id,
-        charge_milli=charge_milli,
+        charge_milli=int(result.charge * 1000) if result.charge else 0,
         status="processing",
     )
 
@@ -281,20 +282,20 @@ async def get_order_status(provider_order_id: str):
         return OrderStatus(
             provider_order_id=local["provider_order_id"],
             status=local["status"],
-            charge_milli=local["charge_milli"],
+            charge_milli=local["api_price_per_1000_milli"],
         )
 
     # Update local status
     new_status = result.get("status", local["status"])
     db.execute(
-        "UPDATE provider_orders SET status=?, updated_at=? WHERE provider_order_id=?",
-        (new_status, datetime.utcnow().isoformat(), provider_order_id),
+        "UPDATE provider_orders SET status=?, updated_at=?, api_response=? WHERE provider_order_id=?",
+        (new_status, datetime.utcnow().isoformat(), str(result), provider_order_id),
     )
 
     return OrderStatus(
         provider_order_id=provider_order_id,
         status=new_status,
-        charge_milli=int(result["charge"] * 1000) if result.get("charge") else local["charge_milli"],
+        charge_milli=int(result["charge"] * 1000) if result.get("charge") else local["api_price_per_1000_milli"],
     )
 
 

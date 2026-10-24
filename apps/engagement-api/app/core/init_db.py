@@ -47,27 +47,30 @@ CREATE TABLE IF NOT EXISTS engagement_provider_services (
     UNIQUE(provider_id, provider_service_id)
 );
 
--- Provider orders (for tracking)
+-- Provider orders (for tracking) - matches migration 001
 CREATE TABLE IF NOT EXISTS provider_orders (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
-    provider_name TEXT NOT NULL,
+    order_id INTEGER REFERENCES orders(id),
+    provider_name TEXT NOT NULL DEFAULT 'vietnamfb',
     provider_service_id TEXT NOT NULL,
     provider_order_id TEXT NOT NULL,
     quantity INTEGER NOT NULL,
     link TEXT NOT NULL,
     unit_price_milli INTEGER NOT NULL,
-    charge_milli INTEGER NOT NULL DEFAULT 0,
-    status TEXT NOT NULL DEFAULT 'processing',
-    idempotency_key TEXT NOT NULL UNIQUE,
+    markup_percent INTEGER NOT NULL DEFAULT 0,
+    api_price_per_1000_milli INTEGER NOT NULL,
+    status TEXT NOT NULL DEFAULT 'pending',
+    api_response TEXT NOT NULL DEFAULT '{}',
     created_at TEXT NOT NULL,
-    updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+    updated_at TEXT NOT NULL,
+    UNIQUE(provider_name, provider_order_id)
 );
 
 -- Indexes
 CREATE INDEX IF NOT EXISTS idx_engagement_categories_platform ON engagement_categories(platform_id);
 CREATE INDEX IF NOT EXISTS idx_engagement_provider_services_category ON engagement_provider_services(category_id);
+CREATE INDEX IF NOT EXISTS idx_provider_orders_order ON provider_orders(order_id);
 CREATE INDEX IF NOT EXISTS idx_provider_orders_provider ON provider_orders(provider_name, provider_order_id);
-CREATE INDEX IF NOT EXISTS idx_provider_orders_idempotency ON provider_orders(idempotency_key);
 """
 
 ENGAGEMENT_PLATFORMS = [
