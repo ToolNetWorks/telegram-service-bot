@@ -120,6 +120,31 @@ có `--replace`. SQLite gốc không bao giờ bị xoá/sửa.
 Deploy nhưng **chưa start** (hoặc start với replicas=0) cho đến bước
 cutover.
 
+### 5.1 Trạng thái production hiện tại (2026-10-24)
+
+| Mục | Giá trị |
+|---|---|
+| Northflank project | `default` (team `telegram-service-bots-team`) |
+| Service | `telegram-service-bot` |
+| Region | `europe-west` (GCP `europe-west2`) |
+| Plan | `nf-compute-20` (0.2 vCPU / 512 MB) |
+| Build | GitHub `ToolNetWorks/telegram-service-bot`, branch `master`, `/Dockerfile` |
+| Image commit | `29c4bf7` |
+| Replicas | `1` |
+| Public port | Không |
+| CI | Đã tắt (`disabledCI=true`) để tránh auto-deploy ngoài ý muốn |
+| Rollout | `recreate` — container cũ dừng trước khi container mới start |
+| Health check | CMD `python3 healthcheck.py`, liveness, 60s/lần, timeout 20s, 3 lần fail |
+| Turso | `aws-eu-west-1` |
+| VPS | Đã dừng bot; `botctl.sh start` bị chặn nếu `TURSO_URL` có trong `.env` |
+
+Backup trước cutover: `backups/bot.sqlite3.20261024-024100.backup`
+Rollback snapshot sau cutover: `backups/rollback-20261024-024459.sqlite3`
+
+> Sau cutover, **Turso là nguồn dữ liệu chính**. Không chạy
+> `migrate_to_turso.py --replace` từ SQLite VPS nữa (SQLite đã cũ).
+> Nếu cần rollback, dùng `migrate_from_turso.py` để export Turso → SQLite.
+
 ---
 
 ## 6. Cutover an toàn (một chiều)
@@ -148,6 +173,9 @@ python3 migrate_to_turso.py --verify-only
 #    "Database backend: Turso (remote)"
 #    "Bot @ToolNettBot đã hoạt động, admin count=1"
 ```
+
+> Quy trình trên chỉ dùng cho **lần cutover đầu tiên**. Sau khi Northflank
+> đã chạy, không migrate SQLite → Turso nữa; SQLite VPS đã cũ. Xem mục 5.1.
 
 ### Kiểm tra sau cutover
 

@@ -12,6 +12,14 @@ cd "$BOT_DIR"
 
 case "${1:-}" in
     start)
+        # Production runs on Northflank. Refuse an accidental second poller on VPS
+        # when Turso is configured, unless this is an explicit SQLite rollback.
+        if grep -qE '^[[:space:]]*TURSO_URL=.+' .env 2>/dev/null && [ "${DB_BACKEND:-}" != "sqlite" ]; then
+            echo "REFUSING to start on VPS: TURSO_URL is set."
+            echo "Production is on Northflank. For rollback only, after scaling Northflank to 0:"
+            echo "  DB_BACKEND=sqlite ./botctl.sh start"
+            exit 1
+        fi
         if [ -f "$PID_FILE" ]; then
             PID=$(cat "$PID_FILE")
             if kill -0 "$PID" 2>/dev/null; then
