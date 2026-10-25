@@ -25,6 +25,7 @@ class Platform:
     enabled: bool = True
     coming_soon: bool = False
     icon: str = ""
+    emoji: str = ""
     sort_order: int = 0
     visible: bool = True
 

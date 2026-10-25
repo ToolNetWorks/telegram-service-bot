@@ -20,7 +20,8 @@ class PlatformDefinition:
     slug: str
     name: str
     name_en: str
-    icon: str  # URL/path to icon image (PNG/SVG) or emoji fallback
+    icon: str  # URL/path to icon image (PNG/SVG) for web UI
+    emoji: str  # Unicode emoji for Telegram button text
     sort_order: int
     enabled: bool
     coming_soon: bool
@@ -54,12 +55,14 @@ class ServiceDefinition:
     status: str = "active"
 
 
-PLATFORMS: tuple[PlatformDefinition, ...] = (    PlatformDefinition(
+PLATFORMS: tuple[PlatformDefinition, ...] = (
+    PlatformDefinition(
         id=1,
         slug="facebook",
         name="Facebook",
         name_en="Facebook",
         icon="/static/icons/facebook.png",
+        emoji="📘",
         sort_order=1,
         enabled=True,
         coming_soon=False,
@@ -71,6 +74,7 @@ PLATFORMS: tuple[PlatformDefinition, ...] = (    PlatformDefinition(
         name="Instagram",
         name_en="Instagram",
         icon="/static/icons/instagram.png",
+        emoji="📷",
         sort_order=2,
         enabled=True,
         coming_soon=False,
@@ -82,6 +86,7 @@ PLATFORMS: tuple[PlatformDefinition, ...] = (    PlatformDefinition(
         name="Threads",
         name_en="Threads",
         icon="/static/icons/threads.svg",
+        emoji="🧵",
         sort_order=3,
         enabled=True,
         coming_soon=False,
@@ -93,6 +98,7 @@ PLATFORMS: tuple[PlatformDefinition, ...] = (    PlatformDefinition(
         name="TikTok",
         name_en="TikTok",
         icon="/static/icons/tiktok.png",
+        emoji="🎵",
         sort_order=4,
         enabled=True,
         coming_soon=False,
@@ -104,6 +110,7 @@ PLATFORMS: tuple[PlatformDefinition, ...] = (    PlatformDefinition(
         name="Telegram",
         name_en="Telegram",
         icon="/static/icons/telegram.png",
+        emoji="📱",
         sort_order=5,
         enabled=True,
         coming_soon=False,
@@ -115,6 +122,7 @@ PLATFORMS: tuple[PlatformDefinition, ...] = (    PlatformDefinition(
         name="YouTube",
         name_en="YouTube",
         icon="/static/icons/youtube.png",
+        emoji="📺",
         sort_order=6,
         enabled=False,
         coming_soon=True,
@@ -126,6 +134,7 @@ PLATFORMS: tuple[PlatformDefinition, ...] = (    PlatformDefinition(
         name="Twitter",
         name_en="Twitter",
         icon="/static/icons/twitter.png",
+        emoji="𝕏",
         sort_order=7,
         enabled=False,
         coming_soon=True,
@@ -137,6 +146,7 @@ PLATFORMS: tuple[PlatformDefinition, ...] = (    PlatformDefinition(
         name="Shopee",
         name_en="Shopee",
         icon="/static/icons/shopee.svg",
+        emoji="🛍️",
         sort_order=8,
         enabled=False,
         coming_soon=True,

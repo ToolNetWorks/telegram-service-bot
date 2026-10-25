@@ -39,8 +39,8 @@ def build_tools_keyboard(t) -> dict[str, Any]:
 def _platform_label(t, platform: dict) -> str:
     slug = platform.get("slug", "")
     name = t(f"engagement_{slug}") if t(f"engagement_{slug}") != f"engagement_{slug}" else platform.get("name", slug)
-    icon = platform.get("icon", "")
-    label = f"{icon} {name}".strip()
+    emoji = platform.get("emoji", "")
+    label = f"{emoji} {name}".strip()
     if not platform.get("enabled", True) or platform.get("coming_soon", False):
         label = f"{label} {t('engagement_coming_soon')}"
     return label

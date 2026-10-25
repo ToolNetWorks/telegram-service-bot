@@ -13,6 +13,7 @@ class PlatformRead(BaseModel):
     name: str
     name_en: str = ""
     icon: str = ""
+    emoji: str = ""
     sort_order: int = 0
     enabled: bool = True
     coming_soon: bool = False
