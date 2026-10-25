@@ -330,6 +330,7 @@ class EngagementAPIIntegrationTest(unittest.TestCase):
 
                 uid = 111
                 users.ensure_user(uid, "user", "User")
+                users.verify_user(uid)  # Verify user to skip CAPTCHA
                 db.execute("UPDATE users SET balance=?", (1_000_000,))
 
                 def callback(data: str) -> None:

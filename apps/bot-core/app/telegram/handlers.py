@@ -117,14 +117,19 @@ class Handlers:
             lang_code = data.split(":", 1)[1]
             if lang_code in LANGUAGES:
                 self.user_repo.set_language(uid, lang_code)
-                self._send_home(uid, lang_code)
+                # Check if we're in post-CAPTCHA language selection flow
+                state = self.state_manager.get_state(uid)
+                if state.name == "post_captcha_language":
+                    pending_action = state.data.get("pending_action", "home")
+                    self.state_manager.clear_state(uid)
+                    self._execute_pending_action(uid, lang_code, lambda k, **kw: translate(lang_code, k, **kw), pending_action)
+                else:
+                    self._send_home(uid, lang_code)
             return
 
+        # Public callbacks - no verification required
         if data == "home":
             self._send_home(uid, lang)
-            return
-        if data == "wallet":
-            self._show_wallet(uid, lang, t)
             return
         if data == "tools":
             self._show_tools(uid, lang, t)
@@ -141,34 +146,56 @@ class Handlers:
         if data == "changelog":
             self._show_changelog(uid, lang, t)
             return
-        if data == "orders":
-            self._show_orders(uid, lang, t)
-            return
         if data == "language":
             self._show_language(uid, lang, t)
             return
 
+        # Callbacks that require verification
+        if data == "wallet":
+            if not self._require_verification(uid, lang, t, "wallet"):
+                return
+            self._show_wallet(uid, lang, t)
+            return
+        if data == "orders":
+            if not self._require_verification(uid, lang, t, "orders"):
+                return
+            self._show_orders(uid, lang, t)
+            return
         if data == "tools:report":
+            if not self._require_verification(uid, lang, t, "services"):
+                return
             self._start_report_flow(uid, lang, t)
             return
         if data == "tools:engagement":
+            if not self._require_verification(uid, lang, t, "services"):
+                return
             self._show_engagement_platforms(uid, lang, t)
             return
         if data == "tools:buy":
+            if not self._require_verification(uid, lang, t, "services"):
+                return
             self._show_tool_buy(uid, lang, t)
             return
         if data == "tools:sub":
+            if not self._require_verification(uid, lang, t, "services"):
+                return
             self._show_tool_sub(uid, lang, t)
             return
 
-        # Engagement navigation (current and legacy callback formats)
+        # Engagement navigation - require verification
         if data.startswith("engagement:platform:"):
+            if not self._require_verification(uid, lang, t, "services"):
+                return
             self._show_engagement_categories(uid, lang, t, data.split(":", 2)[2])
             return
         if data.startswith("engagement:coming_soon:"):
+            if not self._require_verification(uid, lang, t, "services"):
+                return
             self._show_coming_soon(uid, lang, t, data.split(":", 2)[2])
             return
         if data.startswith("engagement:category:"):
+            if not self._require_verification(uid, lang, t, "services"):
+                return
             try:
                 category_id = int(data.split(":", 2)[2])
             except ValueError:
@@ -177,6 +204,8 @@ class Handlers:
             self._show_category_services(uid, lang, t, category_id)
             return
         if data.startswith("engagement:service:"):
+            if not self._require_verification(uid, lang, t, "services"):
+                return
             try:
                 service_id = int(data.split(":", 2)[2])
             except ValueError:
@@ -187,10 +216,14 @@ class Handlers:
 
         # Historical callbacks from messages sent before the API split.
         if data in ("engagement:telegram_members", "engagement:telegram_views"):
+            if not self._require_verification(uid, lang, t, "services"):
+                return
             slug = "members" if data.endswith("members") else "views"
             self._show_category_by_slug(uid, lang, t, "telegram", slug)
             return
         if data.startswith("tg_member_select:"):
+            if not self._require_verification(uid, lang, t, "services"):
+                return
             try:
                 service_id = int(data.split(":", 1)[1])
             except ValueError:
@@ -199,24 +232,38 @@ class Handlers:
             self._start_engagement_order(uid, lang, t, service_id)
             return
 
+        # Order confirmation - requires verification
         if data == "engagement:confirm" or data == "tg_member_confirm_pay":
+            if not self._require_verification(uid, lang, t, "services"):
+                return
             self._confirm_engagement_order(uid, lang, t, None)
             return
         if data.startswith("tg_member_confirm_pay:"):
+            if not self._require_verification(uid, lang, t, "services"):
+                return
             # Legacy messages embedded service/link/quantity in callback_data.
             self._confirm_engagement_order(uid, lang, t, data)
             return
 
+        # Deposit - requires verification
         if data == "deposit":
+            if not self._require_verification(uid, lang, t, "wallet"):
+                return
             self._start_deposit(uid, lang, t)
             return
         if data == "cancel_deposit":
             state = self.state_manager.get_state(uid)
             if state.name == States.DEPOSIT_AMOUNT:
                 self.state_manager.clear_state(uid)
-                self._show_wallet(uid, lang, t)
+                if self._require_verification(uid, lang, t, "wallet"):
+                    self._show_wallet(uid, lang, t)
             return
         if data.startswith("admin:"):
+            # Admin callbacks require verification + admin check
+            if uid not in self.config.admin_ids:
+                return
+            if not self._require_verification(uid, lang, t, "admin"):
+                return
             self._handle_admin(uid, lang, t, data)
             return
 
@@ -260,7 +307,14 @@ class Handlers:
                 if ref.isdigit():
                     ref_id = int(ref)
                     self.user_repo.ensure_user(uid, "", "", ref_id if ref_id != uid else None)
-            self._start_captcha(uid, lang, t)
+            # Check if user is already verified
+            user = self.user_repo.get_user(uid)
+            if user and user["verified_at"]:
+                # User already verified, show home directly
+                self._send_home(uid, lang)
+                return
+            # User not verified, start CAPTCHA with pending_action="home"
+            self._start_captcha(uid, lang, t, pending_action="home")
             return
         if cmd == "/cancel":
             self.state_manager.clear_state(uid)
@@ -269,14 +323,21 @@ class Handlers:
         if cmd in ("/help", "/menu"):
             self._send_home(uid, lang)
             return
-        if cmd == "/wallet":
-            self._show_wallet(uid, lang, t)
-            return
-        if cmd == "/orders":
-            self._show_orders(uid, lang, t)
+        # Commands that require verification
+        if cmd in ("/wallet", "/orders"):
+            pending_action = "wallet" if cmd == "/wallet" else "orders"
+            if not self._require_verification(uid, lang, t, pending_action):
+                return
+            if cmd == "/wallet":
+                self._show_wallet(uid, lang, t)
+            else:
+                self._show_orders(uid, lang, t)
             return
         if uid in self.config.admin_ids:
             if cmd == "/admin":
+                # Admin panel requires verification + admin check
+                if not self._require_verification(uid, lang, t, "admin"):
+                    return
                 self._show_admin_panel(uid, lang, t)
                 return
             if cmd == "/approve":
@@ -290,31 +351,94 @@ class Handlers:
                 return
 
     # ------------------------------------------------------------------
-    # Onboarding / simple menus
+    # Verification helpers
     # ------------------------------------------------------------------
 
-    def _start_captcha(self, uid: int, lang: str, t) -> None:
+    # Actions that require user verification
+    _VERIFIED_ACTIONS: set[str] = {
+        "wallet", "orders", "services", "admin", "engagement",
+    }
+
+    # Callback actions that require verification (mapped to pending_action)
+    _VERIFIED_CALLBACKS: dict[str, str] = {
+        "wallet": "wallet",
+        "orders": "orders",
+        "tools:engagement": "services",
+        "tools:buy": "services",
+        "tools:sub": "services",
+        "tools:report": "services",
+        "engagement:platform:telegram": "services",
+        "engagement:platform:facebook": "services",
+        "engagement:platform:instagram": "services",
+        "engagement:platform:tiktok": "services",
+        "engagement:platform:threads": "services",
+        "engagement:platform:youtube": "services",
+        "engagement:platform:twitter": "services",
+        "engagement:platform:shopee": "services",
+        "deposit": "wallet",
+    }
+
+    def _is_verified(self, uid: int) -> bool:
+        """Check if user is verified (has verified_at in database)."""
+        user = self.user_repo.get_user(uid)
+        if not user:
+            return False
+        # sqlite3.Row doesn't have .get(), use dictionary access
+        return bool(user["verified_at"])
+
+    def _require_verification(self, uid: int, lang: str, t, pending_action: str) -> bool:
+        """Check verification; if not verified, start CAPTCHA with pending_action.
+        Returns True if user is verified and can proceed."""
+        if self._is_verified(uid):
+            return True
+        # Not verified - start CAPTCHA with pending_action
+        self._start_captcha(uid, lang, t, pending_action=pending_action)
+        return False
+
+    def _start_captcha(self, uid: int, lang: str, t, pending_action: str = "home") -> None:
+        """Start CAPTCHA challenge with optional pending_action to resume after verification."""
         a = secrets.randbelow(20) + 1
         b = secrets.randbelow(20) + 1
-        self.state_manager.set_state(uid, States.CAPTCHA, expires_in=120, a=a, b=b, attempts=3)
+        self.state_manager.set_state(
+            uid,
+            States.CAPTCHA,
+            expires_in=120,
+            a=a,
+            b=b,
+            attempts=3,
+            pending_action=pending_action,
+        )
         self.tg.send_message(uid, t("captcha", a=a, b=b), build_cancel_keyboard(t, "home"))
 
     def _handle_captcha(self, uid: int, lang: str, t, text: str, state: UserState) -> None:
+        """Handle CAPTCHA answer. On success, verify user and resume pending_action."""
+        pending_action = state.data.get("pending_action", "home")
         try:
             answer = int(text.strip())
             a = state.data.get("a", 0)
             b = state.data.get("b", 0)
             if answer == a + b:
+                # CAPTCHA correct - verify user and resume pending action
                 self.user_repo.verify_user(uid)
                 self.state_manager.clear_state(uid)
-                self.tg.send_message(uid, t("verified"), build_back_keyboard(t, t("choose_language"), "language"))
+                
+                # Resume pending action
+                self._resume_pending_action(uid, lang, t, pending_action)
             else:
                 attempts = state.data.get("attempts", 3) - 1
                 if attempts <= 0:
                     self.state_manager.clear_state(uid)
-                    self._start_captcha(uid, lang, t)
+                    self._start_captcha(uid, lang, t, pending_action)
                 else:
-                    self.state_manager.set_state(uid, States.CAPTCHA, expires_in=120, a=a, b=b, attempts=attempts)
+                    self.state_manager.set_state(
+                        uid,
+                        States.CAPTCHA,
+                        expires_in=120,
+                        a=a,
+                        b=b,
+                        attempts=attempts,
+                        pending_action=pending_action,
+                    )
                     self.tg.send_message(uid, t("captcha_bad", remaining=attempts), build_cancel_keyboard(t, "home"))
         except ValueError:
             self.tg.send_message(
@@ -322,6 +446,54 @@ class Handlers:
                 t("captcha_bad", remaining=state.data.get("attempts", 3)),
                 build_cancel_keyboard(t, "home"),
             )
+
+    def _resume_pending_action(self, uid: int, lang: str, t, pending_action: str) -> None:
+        """After successful verification, execute the pending action.
+        If user hasn't selected a language yet, show language selection first."""
+        user = self.user_repo.get_user(uid)
+        user_lang = user["language"] if user else None
+        
+        # If no language selected yet, show language selection
+        if not user_lang:
+            # Store pending_action in state to resume after language selection
+            self.state_manager.set_state(
+                uid,
+                "post_captcha_language",
+                expires_in=300,
+                pending_action=pending_action,
+            )
+            self.tg.send_message(uid, t("choose_language"), self._build_language_keyboard(t))
+            return
+        
+        # Language already selected, proceed with pending action
+        self._execute_pending_action(uid, user_lang, t, pending_action)
+
+    def _execute_pending_action(self, uid: int, lang: str, t, pending_action: str) -> None:
+        """Execute the pending action directly (language already selected)."""
+        if pending_action == "home":
+            self._send_home(uid, lang)
+        elif pending_action == "wallet":
+            self._show_wallet(uid, lang, t)
+        elif pending_action == "orders":
+            self._show_orders(uid, lang, t)
+        elif pending_action == "services":
+            self._show_engagement_platforms(uid, lang, t)
+        elif pending_action == "admin":
+            if uid in self.config.admin_ids:
+                self._show_admin_panel(uid, lang, t)
+            else:
+                self._send_home(uid, lang)
+        else:
+            # Unknown action - default to home
+            self._send_home(uid, lang)
+
+    def _build_language_keyboard(self, t) -> dict:
+        """Build inline keyboard for language selection."""
+        rows = []
+        for code, name in LANGUAGES.items():
+            rows.append(((f"{name}", f"lang:{code}"),))
+        rows.append(((t("cancel"), "home"),))
+        return {"inline_keyboard": rows}
 
     def _send_home(self, uid: int, lang: str) -> None:
         t = lambda key, **kw: translate(lang, key, **kw)

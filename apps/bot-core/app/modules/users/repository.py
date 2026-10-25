@@ -20,10 +20,17 @@ class UserRepository:
                 "VALUES (?,?,?,?,?)",
                 (user_id, username, display_name, referral, self.db.utcnow()),
             )
-            self.db.execute(
-                "UPDATE users SET username=?, display_name=? WHERE user_id=?",
-                (username, display_name, user_id),
-            )
+            # Update username, display_name, and referred_by (if not already set)
+            if referral is not None:
+                self.db.execute(
+                    "UPDATE users SET username=?, display_name=?, referred_by=COALESCE(referred_by, ?) WHERE user_id=?",
+                    (username, display_name, referral, user_id),
+                )
+            else:
+                self.db.execute(
+                    "UPDATE users SET username=?, display_name=? WHERE user_id=?",
+                    (username, display_name, user_id),
+                )
     
     def get_user(self, user_id: int) -> dict | None:
         """Get user by ID."""

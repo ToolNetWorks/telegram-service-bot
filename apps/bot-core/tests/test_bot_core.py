@@ -166,6 +166,8 @@ class BotCoreTestCase(unittest.TestCase):
             engagement_client=self.client,
         )
         self.users.ensure_user(USER_ID, "user", "User")
+        # Pre-verify user for tests that don't test CAPTCHA flow
+        self.users.verify_user(USER_ID)
 
     def tearDown(self) -> None:
         self.db.close()
@@ -540,6 +542,215 @@ class BotCoreTestCase(unittest.TestCase):
         self.assertEqual(self.state.get_state(USER_ID).name, "engagement_qty")
         self.msg("1000001")
         self.assertIn("SỐ LƯỢNG KHÔNG HỢP LỆ", self.last()["text"])
+
+    # -- CAPTCHA & Verification Flow Tests ----------------------------
+
+    def test_new_user_start_shows_captcha(self) -> None:
+        """Test 1: New user enters /start -> shows CAPTCHA."""
+        self.users.ensure_user(USER_ID, "user", "User")
+        # Ensure user is NOT verified
+        self.db.execute("UPDATE users SET verified_at='' WHERE user_id=?", (USER_ID,))
+        self.db.execute("UPDATE users SET language='' WHERE user_id=?", (USER_ID,))
+        
+        self.msg("/start")
+        text = self.last()["text"]
+        self.assertIn("yêu cầu xác minh", text.lower())
+        self.assertIn("=", text)  # Math CAPTCHA
+        state = self.state.get_state(USER_ID)
+        self.assertEqual(state.name, "captcha")
+        self.assertIn("pending_action", state.data)
+        self.assertEqual(state.data["pending_action"], "home")
+
+    def test_new_user_captcha_success_then_verified(self) -> None:
+        """Test 2: New user passes CAPTCHA -> verified, then home menu."""
+        self.users.ensure_user(USER_ID, "user", "User")
+        self.db.execute("UPDATE users SET verified_at='' WHERE user_id=?", (USER_ID,))
+        self.db.execute("UPDATE users SET language='vi' WHERE user_id=?", (USER_ID,))
+        
+        self.msg("/start")
+        state = self.state.get_state(USER_ID)
+        a = state.data["a"]
+        b = state.data["b"]
+        answer = a + b
+        
+        self.msg(str(answer))
+        
+        # Should be verified now
+        user = self.users.get_user(USER_ID)
+        self.assertTrue(user["verified_at"])
+        
+        # Should show home menu (language already set)
+        self.assertIn("Chào mừng trở lại", self.last()["text"])
+
+    def test_verified_user_start_skips_captcha(self) -> None:
+        """Test 3: Verified user enters /start multiple times -> no CAPTCHA."""
+        # User is already verified from setUp
+        self.msg("/start")
+        self.assertIn("Chào mừng trở lại", self.last()["text"])
+        
+        # Second /start
+        self.msg("/start")
+        self.assertIn("Chào mừng trở lại", self.last()["text"])
+        
+        # Third /start
+        self.msg("/start")
+        self.assertIn("Chào mừng trở lại", self.last()["text"])
+        
+        # Should never show CAPTCHA
+        for sent in self.tg.sent:
+            self.assertNotIn("yêu cầu xác minh", sent["text"].lower())
+
+    def test_unverified_user_wallet_triggers_captcha(self) -> None:
+        """Test 4: Unverified user enters /wallet -> CAPTCHA."""
+        self.users.ensure_user(USER_ID, "user", "User")
+        self.db.execute("UPDATE users SET verified_at='' WHERE user_id=?", (USER_ID,))
+        self.db.execute("UPDATE users SET language='vi' WHERE user_id=?", (USER_ID,))
+        
+        self.msg("/wallet")
+        text = self.last()["text"]
+        self.assertIn("yêu cầu xác minh", text.lower())
+        state = self.state.get_state(USER_ID)
+        self.assertEqual(state.name, "captcha")
+        self.assertEqual(state.data["pending_action"], "wallet")
+
+    def test_captcha_success_resumes_wallet(self) -> None:
+        """Test 5: CAPTCHA success automatically opens Wallet."""
+        self.users.ensure_user(USER_ID, "user", "User")
+        self.db.execute("UPDATE users SET verified_at='' WHERE user_id=?", (USER_ID,))
+        self.db.execute("UPDATE users SET language='vi' WHERE user_id=?", (USER_ID,))
+        
+        self.msg("/wallet")
+        state = self.state.get_state(USER_ID)
+        answer = state.data["a"] + state.data["b"]
+        
+        self.msg(str(answer))
+        
+        # Should be verified and show wallet
+        user = self.users.get_user(USER_ID)
+        self.assertTrue(user["verified_at"])
+        self.assertIn("Ví tiền", self.last()["text"])
+        self.assertIn("Số dư", self.last()["text"])
+
+    def test_captcha_success_resumes_orders(self) -> None:
+        """Test 6: User enters /orders -> CAPTCHA -> verified -> Orders."""
+        self.users.ensure_user(USER_ID, "user", "User")
+        self.db.execute("UPDATE users SET verified_at='' WHERE user_id=?", (USER_ID,))
+        self.db.execute("UPDATE users SET language='vi' WHERE user_id=?", (USER_ID,))
+        
+        self.msg("/orders")
+        state = self.state.get_state(USER_ID)
+        answer = state.data["a"] + state.data["b"]
+        
+        self.msg(str(answer))
+        
+        user = self.users.get_user(USER_ID)
+        self.assertTrue(user["verified_at"])
+        self.assertIn("Đơn của tôi", self.last()["text"])
+
+    def test_verification_persists_after_restart(self) -> None:
+        """Test 7: Verification state persists in Turso (simulated by new handler instance)."""
+        self.users.ensure_user(USER_ID, "user", "User")
+        self.db.execute("UPDATE users SET verified_at='' WHERE user_id=?", (USER_ID,))
+        self.db.execute("UPDATE users SET language='vi' WHERE user_id=?", (USER_ID,))
+        
+        # First handler - do CAPTCHA
+        self.msg("/start")
+        state = self.state.get_state(USER_ID)
+        answer = state.data["a"] + state.data["b"]
+        self.msg(str(answer))
+        
+        # Verify user is marked
+        user = self.users.get_user(USER_ID)
+        verified_at = user["verified_at"]
+        self.assertTrue(verified_at)
+        
+        # Simulate restart by creating new handler instance (same DB)
+        new_handlers = Handlers(
+            config=self.config,
+            db=self.db,
+            tg_client=self.tg,
+            user_repo=self.users,
+            wallet_repo=self.wallet,
+            deposit_repo=self.deposits,
+            order_repo=self.orders,
+            services_repo=self.services,
+            engagement_repo=EngagementRepository(self.client),
+            settings_repo=self.settings,
+            state_manager=StateManager(self.db),
+            engagement_client=self.client,
+        )
+        
+        # New handler should see user as verified
+        new_handlers.handle_update(
+            Update(
+                user_id=USER_ID,
+                username="user",
+                display_name="User",
+                message_id=2,
+                text="/start",
+                callback_query_id=None,
+                callback_data=None,
+                is_callback=False,
+            )
+        )
+        # Should show home directly, no CAPTCHA
+        self.assertIn("Chào mừng trở lại", self.last()["text"])
+
+    def test_referral_preserved_through_captcha(self) -> None:
+        """Test 8: /start with referral preserves referral after CAPTCHA."""
+        ref_id = 999
+        self.users.ensure_user(ref_id, "referrer", "Referrer")
+        self.users.verify_user(ref_id)
+        
+        self.users.ensure_user(USER_ID, "user", "User")
+        self.db.execute("UPDATE users SET verified_at='' WHERE user_id=?", (USER_ID,))
+        self.db.execute("UPDATE users SET language='vi' WHERE user_id=?", (USER_ID,))
+        
+        self.msg(f"/start {ref_id}")
+        
+        state = self.state.get_state(USER_ID)
+        answer = state.data["a"] + state.data["b"]
+        self.msg(str(answer))
+        
+        # Check referral was preserved
+        user = self.users.get_user(USER_ID)
+        self.assertEqual(user["referred_by"], ref_id)
+        self.assertTrue(user["verified_at"])
+
+    def test_callback_requires_verification(self) -> None:
+        """Test 9: Unverified user callback -> CAPTCHA, not direct execution."""
+        self.users.ensure_user(USER_ID, "user", "User")
+        self.db.execute("UPDATE users SET verified_at='' WHERE user_id=?", (USER_ID,))
+        self.db.execute("UPDATE users SET language='vi' WHERE user_id=?", (USER_ID,))
+        
+        # Try to access wallet via callback
+        self.cb("wallet")
+        text = self.last()["text"]
+        self.assertIn("yêu cầu xác minh", text.lower())
+        
+        state = self.state.get_state(USER_ID)
+        self.assertEqual(state.name, "captcha")
+        self.assertEqual(state.data["pending_action"], "wallet")
+
+    def test_no_captcha_for_verified_user(self) -> None:
+        """Test 10: Verified user never gets new CAPTCHA."""
+        # User already verified from setUp
+        for _ in range(5):
+            self.msg("/start")
+            self.assertIn("Chào mừng trở lại", self.last()["text"])
+        
+        self.cb("wallet")
+        self.assertIn("Ví tiền", self.last()["text"])
+        
+        self.cb("orders")
+        self.assertIn("Đơn của tôi", self.last()["text"])
+        
+        self.cb("tools:engagement")
+        self.assertIn("Engagement Services", self.last()["text"])
+        
+        # No CAPTCHA ever shown
+        for sent in self.tg.sent:
+            self.assertNotIn("yêu cầu xác minh", sent["text"].lower())
 
 
 if __name__ == "__main__":
