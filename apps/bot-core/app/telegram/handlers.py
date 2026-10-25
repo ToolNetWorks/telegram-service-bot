@@ -522,12 +522,17 @@ class Handlers:
         from pathlib import Path
         import os
         
-        gif_path = Path(__file__).resolve().parent.parent.parent.parent.parent / "assets" / "gifs" / "welcome.gif"
-        if not gif_path.is_file():
+        # Resolve welcome.gif path: works in Docker (/app/assets/) and local VPS (repo root)
+        gif_path = self._resolve_welcome_gif_path()
+        if gif_path is None or not gif_path.is_file():
+            LOG.warning("welcome.gif not found at any known path; skipping animation")
             return False
         
-        import stat
         st = gif_path.stat()
+        if st.st_size == 0:
+            LOG.warning("welcome.gif exists but is empty (%s); skipping animation", gif_path)
+            return False
+        
         signature = f"{st.st_size}:{int(st.st_mtime)}"
         
         # Check cache
@@ -539,21 +544,59 @@ class Handlers:
                 self.tg.send_media(uid, "animation", cached_id, text[:1024], markup)
                 return True
             except Exception as exc:
-                LOG.warning("Failed to send cached welcome.gif, re-uploading: %s", exc)
+                LOG.warning("Failed to send cached welcome.gif (file_id=%s), re-uploading: %s", cached_id, exc)
                 self.settings_repo.set("welcome_gif_id", "")
         
         # Upload new
         try:
             result = self.tg.send_animation_file(uid, gif_path, text[:1024], markup)
         except Exception as exc:
-            LOG.warning("Failed to upload welcome.gif, using text: %s", exc)
+            LOG.warning("Failed to upload welcome.gif from %s, using text fallback: %s", gif_path, exc)
             return False
         
         file_id = ((result or {}).get("animation") or {}).get("file_id")
         if file_id:
             self.settings_repo.set("welcome_gif_id", file_id)
             self.settings_repo.set("welcome_gif_sig", signature)
+            LOG.info("Uploaded and cached welcome.gif (file_id=%s, sig=%s)", file_id, signature)
+        else:
+            LOG.warning("Telegram returned no file_id for welcome.gif upload")
         return True
+
+    def _resolve_welcome_gif_path(self) -> Path | None:
+        """Find welcome.gif in Docker or local VPS environment.
+        
+        Search order:
+        1. ASSETS_PATH env var (explicit override)
+        2. Docker absolute path: /app/assets/gifs/welcome.gif
+        3. Relative to working directory: assets/gifs/welcome.gif (Docker cwd=/app)
+        4. Repo root relative to this file (local VPS): ../../../../../assets/gifs/welcome.gif
+        """
+        from pathlib import Path
+        import os
+        
+        # 1. Explicit env override
+        if assets_base := os.getenv("ASSETS_PATH"):
+            candidate = Path(assets_base) / "gifs" / "welcome.gif"
+            if candidate.is_file():
+                return candidate
+        
+        # 2. Docker absolute path (known location in container)
+        docker_path = Path("/app/assets/gifs/welcome.gif")
+        if docker_path.is_file():
+            return docker_path
+        
+        # 3. Relative to current working directory (Docker WORKDIR=/app)
+        cwd_path = Path.cwd() / "assets" / "gifs" / "welcome.gif"
+        if cwd_path.is_file():
+            return cwd_path
+        
+        # 4. Local VPS: repo root relative to this file
+        local_path = Path(__file__).resolve().parent.parent.parent.parent.parent / "assets" / "gifs" / "welcome.gif"
+        if local_path.is_file():
+            return local_path
+        
+        return None
 
     def _show_wallet(self, uid: int, lang: str, t) -> None:
         balance = self.wallet_repo.get_balance(uid)
