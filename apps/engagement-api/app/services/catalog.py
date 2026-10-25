@@ -126,16 +126,16 @@ class CatalogService:
                 continue
 
             if remote is not None:
-                name = remote.name or definition.display_name
+                name = remote.name or definition.name
                 min_quantity = max(1, remote.min_quantity)
                 max_quantity = max(min_quantity, remote.max_quantity)
                 rate_milli = _milli(remote.rate_per_1000)
                 cost_source = "provider"
             else:
-                name = definition.display_name
+                name = definition.name
                 min_quantity = definition.min_quantity
                 max_quantity = definition.max_quantity
-                rate_milli = definition.fallback_rate_milli
+                rate_milli = definition.rate_milli
                 cost_source = "configured"
 
             result.append(

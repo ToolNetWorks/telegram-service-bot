@@ -221,9 +221,13 @@ class EngagementAPIIntegrationTest(unittest.TestCase):
         self.assertTrue(self.client.health_check())
 
         platforms = self.client.list_platforms()
-        self.assertEqual([item.slug for item in platforms], [
-            "telegram", "youtube", "twitter", "facebook", "instagram", "shopee",
-        ])
+        platform_slugs = [item.slug for item in platforms]
+        # VietnamFB platforms + Telegram + Coming Soon platforms
+        expected_platforms = {
+            "facebook", "instagram", "threads", "tiktok",
+            "telegram", "youtube", "twitter", "shopee"
+        }
+        self.assertEqual(set(platform_slugs), expected_platforms)
         telegram = next(item for item in platforms if item.slug == "telegram")
         self.assertTrue(telegram.enabled)
         youtube = next(item for item in platforms if item.slug == "youtube")

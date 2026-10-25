@@ -134,12 +134,21 @@ class EngagementAPITestCase(unittest.TestCase):
         response = self.client.get("/v1/platforms", headers=TOKEN)
         self.assertEqual(response.status_code, 200)
         platforms = {item["slug"]: item for item in response.json()["platforms"]}
-        self.assertEqual(
-            set(platforms),
-            {"telegram", "youtube", "twitter", "facebook", "instagram", "shopee"},
-        )
+        # VietnamFB platforms + Telegram + Coming Soon platforms
+        expected_platforms = {
+            "facebook", "instagram", "threads", "tiktok",
+            "telegram", "youtube", "twitter", "shopee"
+        }
+        self.assertEqual(set(platforms), expected_platforms)
         self.assertTrue(platforms["telegram"]["enabled"])
         self.assertTrue(platforms["youtube"]["coming_soon"])
+        self.assertTrue(platforms["twitter"]["coming_soon"])
+        self.assertTrue(platforms["shopee"]["coming_soon"])
+        # VietnamFB platforms should be enabled
+        self.assertTrue(platforms["facebook"]["enabled"])
+        self.assertTrue(platforms["instagram"]["enabled"])
+        self.assertTrue(platforms["threads"]["enabled"])
+        self.assertTrue(platforms["tiktok"]["enabled"])
 
     def test_telegram_categories_include_views(self) -> None:
         response = self.client.get("/v1/platforms/telegram/categories", headers=TOKEN)
