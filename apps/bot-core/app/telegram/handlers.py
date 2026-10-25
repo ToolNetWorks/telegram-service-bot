@@ -516,28 +516,29 @@ class Handlers:
         
         self.tg.send_message(uid, text, markup)
 
-    def _send_welcome_animation(self, uid: int, text: str, markup: dict) -> bool:
-        """Upload and cache welcome.mp4 from assets, then send as animation.
+    def _send_cached_animation(self, uid: int, name: str, text: str, markup: dict) -> bool:
+        """Upload and cache a named animation (welcome/tools/engagement) from assets/gifs/.
         Returns True if animation was sent, False on fallback to text."""
         from pathlib import Path
         import os
         
-        # Resolve welcome.mp4 path (preferred) or welcome.gif fallback: works in Docker (/app/assets/) and local VPS (repo root)
-        media_path = self._resolve_welcome_media_path()
+        # Resolve media path: prefers .mp4 then .gif
+        media_path = self._resolve_media_path(name)
         if media_path is None or not media_path.is_file():
-            LOG.warning("welcome.mp4/.gif not found at any known path; skipping animation")
+            LOG.warning("%s.mp4/.gif not found at any known path; skipping animation", name)
             return False
         
         st = media_path.stat()
         if st.st_size == 0:
-            LOG.warning("welcome media exists but is empty (%s); skipping animation", media_path)
+            LOG.warning("%s media exists but is empty (%s); skipping animation", name, media_path)
             return False
         
         signature = f"{st.st_size}:{int(st.st_mtime)}"
+        id_key, sig_key = f"{name}_gif_id", f"{name}_gif_sig"
         
         # Check cache
-        cached_id = self.settings_repo.get("welcome_gif_id")
-        cached_sig = self.settings_repo.get("welcome_gif_sig")
+        cached_id = self.settings_repo.get(id_key)
+        cached_sig = self.settings_repo.get(sig_key)
         
         if cached_sig == signature and cached_id:
             try:
@@ -545,47 +546,47 @@ class Handlers:
                 # Verify Telegram actually returned an animation
                 if (result or {}).get("animation"):
                     return True
-                LOG.warning("Cached file_id did not return animation, clearing cache")
-                self.settings_repo.set("welcome_gif_id", "")
+                LOG.warning("Cached %s file_id did not return animation, clearing cache", name)
+                self.settings_repo.set(id_key, "")
             except Exception as exc:
-                LOG.warning("Failed to send cached welcome media (file_id=%s), re-uploading: %s", cached_id, exc)
-                self.settings_repo.set("welcome_gif_id", "")
+                LOG.warning("Failed to send cached %s media (file_id=%s), re-uploading: %s", name, cached_id, exc)
+                self.settings_repo.set(id_key, "")
         
         # Upload new
         try:
             result = self.tg.send_animation_file(uid, media_path, text[:1024], markup)
         except Exception as exc:
-            LOG.warning("Failed to upload welcome media from %s, using text fallback: %s", media_path, exc)
+            LOG.warning("Failed to upload %s media from %s, using text fallback: %s", name, media_path, exc)
             return False
         
         # Verify Telegram returned a valid animation object
         animation = (result or {}).get("animation")
         file_id = animation.get("file_id") if animation else None
         if file_id and animation:
-            self.settings_repo.set("welcome_gif_id", file_id)
-            self.settings_repo.set("welcome_gif_sig", signature)
-            LOG.info("Uploaded and cached welcome media (file_id=%s, sig=%s, mime=%s, size=%s)", 
-                     file_id, signature, animation.get("mime_type"), animation.get("file_size"))
+            self.settings_repo.set(id_key, file_id)
+            self.settings_repo.set(sig_key, signature)
+            LOG.info("Uploaded and cached %s media (file_id=%s, sig=%s, mime=%s, size=%s)", 
+                     name, file_id, signature, animation.get("mime_type"), animation.get("file_size"))
             return True
         else:
-            LOG.warning("Telegram did not return valid animation object: %s", result)
+            LOG.warning("Telegram did not return valid animation object for %s: %s", name, result)
             return False
 
-    def _resolve_welcome_media_path(self) -> Path | None:
-        """Find welcome.mp4 (preferred) or welcome.gif in Docker or local VPS environment.
+    def _resolve_media_path(self, name: str) -> Path | None:
+        """Find {name}.mp4 (preferred) or {name}.gif in Docker or local VPS environment.
         
         Search order:
         1. ASSETS_PATH env var (explicit override) - tries .mp4 then .gif
-        2. Docker absolute path: /app/assets/gifs/welcome.mp4 then /app/assets/gifs/welcome.gif
-        3. Relative to working directory: assets/gifs/welcome.mp4 then .gif (Docker cwd=/app)
-        4. Repo root relative to this file (local VPS): ../../../../../assets/gifs/welcome.mp4 then .gif
+        2. Docker absolute path: /app/assets/gifs/{name}.mp4 then .gif
+        3. Relative to working directory: assets/gifs/{name}.mp4 then .gif (Docker cwd=/app)
+        4. Repo root relative to this file (local VPS): ../../../../../assets/gifs/{name}.mp4 then .gif
         """
         from pathlib import Path
         import os
         
         def check_candidates(base: Path) -> Path | None:
             for ext in (".mp4", ".gif"):
-                candidate = base / f"welcome{ext}"
+                candidate = base / f"{name}{ext}"
                 if candidate.is_file() and candidate.stat().st_size > 0:
                     return candidate
             return None
@@ -613,13 +614,25 @@ class Handlers:
         
         return None
 
+    # Backward compatibility
+    def _send_welcome_animation(self, uid: int, text: str, markup: dict) -> bool:
+        return self._send_cached_animation(uid, "welcome", text, markup)
+
+    def _resolve_welcome_media_path(self) -> Path | None:
+        return self._resolve_media_path("welcome")
+
     def _show_wallet(self, uid: int, lang: str, t) -> None:
         balance = self.wallet_repo.get_balance(uid)
         text = f"💰 <b>Ví tiền</b>\n\nSố dư: <b>{money(balance)}</b>\n\nChỉ ghi có sau khi Admin xác minh giao dịch thực tế."
         self.tg.send_message(uid, text, build_cancel_keyboard(t, "home"))
 
     def _show_tools(self, uid: int, lang: str, t) -> None:
-        self.tg.send_message(uid, t("tool_menu"), build_tools_keyboard(t))
+        text = t("tool_menu")
+        markup = build_tools_keyboard(t)
+        # Try to send tools animation (like welcome)
+        if self._send_cached_animation(uid, "tools", text, markup):
+            return
+        self.tg.send_message(uid, text, markup)
 
     # ------------------------------------------------------------------
     # Engagement Services UI (all catalog data comes from the API)
