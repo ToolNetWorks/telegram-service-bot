@@ -573,22 +573,21 @@ class Handlers:
             return False
 
     def _resolve_media_path(self, name: str) -> Path | None:
-        """Find {name}.mp4 (preferred) or {name}.gif in Docker or local VPS environment.
+        """Find {name}.mp4 in Docker or local VPS environment.
         
         Search order:
-        1. ASSETS_PATH env var (explicit override) - tries .mp4 then .gif
-        2. Docker absolute path: /app/assets/gifs/{name}.mp4 then .gif
-        3. Relative to working directory: assets/gifs/{name}.mp4 then .gif (Docker cwd=/app)
-        4. Repo root relative to this file (local VPS): ../../../../../assets/gifs/{name}.mp4 then .gif
+        1. ASSETS_PATH env var (explicit override)
+        2. Docker absolute path: /app/assets/gifs/{name}.mp4
+        3. Relative to working directory: assets/gifs/{name}.mp4 (Docker cwd=/app)
+        4. Repo root relative to this file (local VPS): ../../../../../assets/gifs/{name}.mp4
         """
         from pathlib import Path
         import os
         
         def check_candidates(base: Path) -> Path | None:
-            for ext in (".mp4", ".gif"):
-                candidate = base / f"{name}{ext}"
-                if candidate.is_file() and candidate.stat().st_size > 0:
-                    return candidate
+            candidate = base / f"{name}.mp4"
+            if candidate.is_file() and candidate.stat().st_size > 0:
+                return candidate
             return None
         
         # 1. Explicit env override
