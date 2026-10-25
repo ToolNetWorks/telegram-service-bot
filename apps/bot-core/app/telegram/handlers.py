@@ -522,7 +522,7 @@ class Handlers:
         from pathlib import Path
         import os
         
-        gif_path = Path(__file__).resolve().parent.parent.parent.parent / "assets" / "gifs" / "welcome.gif"
+        gif_path = Path(__file__).resolve().parent.parent.parent.parent.parent / "assets" / "gifs" / "welcome.gif"
         if not gif_path.is_file():
             return False
         
