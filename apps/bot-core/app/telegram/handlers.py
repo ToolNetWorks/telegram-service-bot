@@ -517,20 +517,20 @@ class Handlers:
         self.tg.send_message(uid, text, markup)
 
     def _send_welcome_animation(self, uid: int, text: str, markup: dict) -> bool:
-        """Upload and cache welcome.gif from assets, then send as animation.
+        """Upload and cache welcome.mp4 from assets, then send as animation.
         Returns True if animation was sent, False on fallback to text."""
         from pathlib import Path
         import os
         
-        # Resolve welcome.gif path: works in Docker (/app/assets/) and local VPS (repo root)
-        gif_path = self._resolve_welcome_gif_path()
-        if gif_path is None or not gif_path.is_file():
-            LOG.warning("welcome.gif not found at any known path; skipping animation")
+        # Resolve welcome.mp4 path (preferred) or welcome.gif fallback: works in Docker (/app/assets/) and local VPS (repo root)
+        media_path = self._resolve_welcome_media_path()
+        if media_path is None or not media_path.is_file():
+            LOG.warning("welcome.mp4/.gif not found at any known path; skipping animation")
             return False
         
-        st = gif_path.stat()
+        st = media_path.stat()
         if st.st_size == 0:
-            LOG.warning("welcome.gif exists but is empty (%s); skipping animation", gif_path)
+            LOG.warning("welcome media exists but is empty (%s); skipping animation", media_path)
             return False
         
         signature = f"{st.st_size}:{int(st.st_mtime)}"
@@ -541,60 +541,75 @@ class Handlers:
         
         if cached_sig == signature and cached_id:
             try:
-                self.tg.send_media(uid, "animation", cached_id, text[:1024], markup)
-                return True
+                result = self.tg.send_media(uid, "animation", cached_id, text[:1024], markup)
+                # Verify Telegram actually returned an animation
+                if (result or {}).get("animation"):
+                    return True
+                LOG.warning("Cached file_id did not return animation, clearing cache")
+                self.settings_repo.set("welcome_gif_id", "")
             except Exception as exc:
-                LOG.warning("Failed to send cached welcome.gif (file_id=%s), re-uploading: %s", cached_id, exc)
+                LOG.warning("Failed to send cached welcome media (file_id=%s), re-uploading: %s", cached_id, exc)
                 self.settings_repo.set("welcome_gif_id", "")
         
         # Upload new
         try:
-            result = self.tg.send_animation_file(uid, gif_path, text[:1024], markup)
+            result = self.tg.send_animation_file(uid, media_path, text[:1024], markup)
         except Exception as exc:
-            LOG.warning("Failed to upload welcome.gif from %s, using text fallback: %s", gif_path, exc)
+            LOG.warning("Failed to upload welcome media from %s, using text fallback: %s", media_path, exc)
             return False
         
-        file_id = ((result or {}).get("animation") or {}).get("file_id")
-        if file_id:
+        # Verify Telegram returned a valid animation object
+        animation = (result or {}).get("animation")
+        file_id = animation.get("file_id") if animation else None
+        if file_id and animation:
             self.settings_repo.set("welcome_gif_id", file_id)
             self.settings_repo.set("welcome_gif_sig", signature)
-            LOG.info("Uploaded and cached welcome.gif (file_id=%s, sig=%s)", file_id, signature)
+            LOG.info("Uploaded and cached welcome media (file_id=%s, sig=%s, mime=%s, size=%s)", 
+                     file_id, signature, animation.get("mime_type"), animation.get("file_size"))
+            return True
         else:
-            LOG.warning("Telegram returned no file_id for welcome.gif upload")
-        return True
+            LOG.warning("Telegram did not return valid animation object: %s", result)
+            return False
 
-    def _resolve_welcome_gif_path(self) -> Path | None:
-        """Find welcome.gif in Docker or local VPS environment.
+    def _resolve_welcome_media_path(self) -> Path | None:
+        """Find welcome.mp4 (preferred) or welcome.gif in Docker or local VPS environment.
         
         Search order:
-        1. ASSETS_PATH env var (explicit override)
-        2. Docker absolute path: /app/assets/gifs/welcome.gif
-        3. Relative to working directory: assets/gifs/welcome.gif (Docker cwd=/app)
-        4. Repo root relative to this file (local VPS): ../../../../../assets/gifs/welcome.gif
+        1. ASSETS_PATH env var (explicit override) - tries .mp4 then .gif
+        2. Docker absolute path: /app/assets/gifs/welcome.mp4 then /app/assets/gifs/welcome.gif
+        3. Relative to working directory: assets/gifs/welcome.mp4 then .gif (Docker cwd=/app)
+        4. Repo root relative to this file (local VPS): ../../../../../assets/gifs/welcome.mp4 then .gif
         """
         from pathlib import Path
         import os
         
+        def check_candidates(base: Path) -> Path | None:
+            for ext in (".mp4", ".gif"):
+                candidate = base / f"welcome{ext}"
+                if candidate.is_file() and candidate.stat().st_size > 0:
+                    return candidate
+            return None
+        
         # 1. Explicit env override
         if assets_base := os.getenv("ASSETS_PATH"):
-            candidate = Path(assets_base) / "gifs" / "welcome.gif"
-            if candidate.is_file():
+            candidate = check_candidates(Path(assets_base) / "gifs")
+            if candidate:
                 return candidate
         
         # 2. Docker absolute path (known location in container)
-        docker_path = Path("/app/assets/gifs/welcome.gif")
-        if docker_path.is_file():
-            return docker_path
+        candidate = check_candidates(Path("/app/assets/gifs"))
+        if candidate:
+            return candidate
         
         # 3. Relative to current working directory (Docker WORKDIR=/app)
-        cwd_path = Path.cwd() / "assets" / "gifs" / "welcome.gif"
-        if cwd_path.is_file():
-            return cwd_path
+        candidate = check_candidates(Path.cwd() / "assets" / "gifs")
+        if candidate:
+            return candidate
         
         # 4. Local VPS: repo root relative to this file
-        local_path = Path(__file__).resolve().parent.parent.parent.parent.parent / "assets" / "gifs" / "welcome.gif"
-        if local_path.is_file():
-            return local_path
+        candidate = check_candidates(Path(__file__).resolve().parent.parent.parent.parent.parent / "assets" / "gifs")
+        if candidate:
+            return candidate
         
         return None
 
