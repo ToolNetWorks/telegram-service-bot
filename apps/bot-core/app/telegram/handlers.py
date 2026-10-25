@@ -44,6 +44,11 @@ LOG = logging.getLogger("botcore.handlers")
 TELEGRAM_LINK_RE = re.compile(r"^(?:https://t\.me/[A-Za-z0-9_+]{3,}|@[A-Za-z0-9_]{3,})$")
 
 
+def money(amount: int | float) -> str:
+    """Format amount as VND with dot thousands separator and VNĐ suffix."""
+    return f"{int(amount):,}".replace(",", ".") + " VNĐ"
+
+
 @dataclass
 class Update:
     """Parsed Telegram update."""
@@ -310,8 +315,8 @@ class Handlers:
             # Check if user is already verified
             user = self.user_repo.get_user(uid)
             if user and user["verified_at"]:
-                # User already verified, show home directly
-                self._send_home(uid, lang)
+                # User already verified, show home with welcome GIF
+                self._send_home(uid, lang, welcome=True)
                 return
             # User not verified, start CAPTCHA with pending_action="home"
             self._start_captcha(uid, lang, t, pending_action="home")
@@ -495,15 +500,63 @@ class Handlers:
         rows.append(((t("cancel"), "home"),))
         return {"inline_keyboard": rows}
 
-    def _send_home(self, uid: int, lang: str) -> None:
+    def _send_home(self, uid: int, lang: str, welcome: bool = False) -> None:
         t = lambda key, **kw: translate(lang, key, **kw)
         user = self.user_repo.get_user(uid)
-        name = html.escape(user["display_name"]) if user and user["display_name"] else "User"
-        self.tg.send_message(uid, t("home", name=name), build_home_keyboard(t))
+        name = html.escape((user["display_name"] or "User")[:80]) if user else "User"
+        bot_name = html.escape(self.config.bot_name)
+        text = f"<b>{bot_name}</b>\n\n" + t("home", name=name)
+        markup = build_home_keyboard(t)
+        
+        if welcome:
+            # Try to send welcome GIF
+            if self._send_welcome_animation(uid, text, markup):
+                return
+        
+        self.tg.send_message(uid, text, markup)
+
+    def _send_welcome_animation(self, uid: int, text: str, markup: dict) -> bool:
+        """Upload and cache welcome.gif from assets, then send as animation.
+        Returns True if animation was sent, False on fallback to text."""
+        from pathlib import Path
+        import os
+        
+        gif_path = Path(__file__).resolve().parent.parent.parent.parent / "assets" / "gifs" / "welcome.gif"
+        if not gif_path.is_file():
+            return False
+        
+        import stat
+        st = gif_path.stat()
+        signature = f"{st.st_size}:{int(st.st_mtime)}"
+        
+        # Check cache
+        cached_id = self.settings_repo.get("welcome_gif_id")
+        cached_sig = self.settings_repo.get("welcome_gif_sig")
+        
+        if cached_sig == signature and cached_id:
+            try:
+                self.tg.send_media(uid, "animation", cached_id, text[:1024], markup)
+                return True
+            except Exception as exc:
+                LOG.warning("Failed to send cached welcome.gif, re-uploading: %s", exc)
+                self.settings_repo.set("welcome_gif_id", "")
+        
+        # Upload new
+        try:
+            result = self.tg.send_animation_file(uid, gif_path, text[:1024], markup)
+        except Exception as exc:
+            LOG.warning("Failed to upload welcome.gif, using text: %s", exc)
+            return False
+        
+        file_id = ((result or {}).get("animation") or {}).get("file_id")
+        if file_id:
+            self.settings_repo.set("welcome_gif_id", file_id)
+            self.settings_repo.set("welcome_gif_sig", signature)
+        return True
 
     def _show_wallet(self, uid: int, lang: str, t) -> None:
         balance = self.wallet_repo.get_balance(uid)
-        text = f"💰 <b>Ví tiền</b>\n\nSố dư: <b>{balance:,} VNĐ</b>"
+        text = f"💰 <b>Ví tiền</b>\n\nSố dư: <b>{money(balance)}</b>\n\nChỉ ghi có sau khi Admin xác minh giao dịch thực tế."
         self.tg.send_message(uid, text, build_cancel_keyboard(t, "home"))
 
     def _show_tools(self, uid: int, lang: str, t) -> None:
