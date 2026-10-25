@@ -129,7 +129,8 @@ class Handlers:
                     self.state_manager.clear_state(uid)
                     self._execute_pending_action(uid, lang_code, lambda k, **kw: translate(lang_code, k, **kw), pending_action)
                 else:
-                    self._send_home(uid, lang_code)
+                    # Match old bot.py: language selection sends welcome GIF
+                    self._send_home(uid, lang_code, welcome=True)
             return
 
         # Public callbacks - no verification required
