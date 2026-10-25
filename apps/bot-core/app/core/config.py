@@ -34,8 +34,11 @@ class BotConfig:
     
     @classmethod
     def load(cls, env_file: str = ".env") -> "BotConfig":
-        """Load configuration from environment and .env file."""
-        # Load .env file if exists
+        """Load configuration from environment and .env file (for local dev only).
+        
+        Production reads directly from environment variables injected by Northflank.
+        """
+        # Load .env file if exists (local development only)
         if Path(env_file).exists():
             for line in Path(env_file).read_text(encoding="utf-8").splitlines():
                 line = line.strip()
@@ -46,13 +49,33 @@ class BotConfig:
                 if name.isupper() and name.replace("_", "").isalnum():
                     os.environ.setdefault(name, value.strip().strip('"').strip("'"))
         
+        # Required: Telegram Bot Token
         token = os.getenv("BOT_TOKEN", "").strip()
         if not token or ":" not in token:
             raise ValueError("BOT_TOKEN must be set from @BotFather")
         
+        # Required: Admin IDs
         admin_ids = {int(x.strip()) for x in os.getenv("ADMIN_IDS", "").split(",") if x.strip().isdigit()}
         if not admin_ids:
             raise ValueError("ADMIN_IDS must be set with at least one admin user ID")
+        
+        # Required: Engagement API Token
+        engagement_api_token = os.getenv("ENGAGEMENT_API_TOKEN", "").strip()
+        if not engagement_api_token:
+            raise ValueError("ENGAGEMENT_API_TOKEN must be set (shared with Engagement API)")
+        
+        # Required: Engagement API URL
+        engagement_api_url = os.getenv("ENGAGEMENT_API_URL", "").strip()
+        if not engagement_api_url:
+            raise ValueError("ENGAGEMENT_API_URL must be set")
+        
+        # Database: Turso config validation when using turso backend
+        db_backend = os.getenv("DB_BACKEND", "").strip().lower() or None
+        if db_backend == "turso":
+            turso_url = os.getenv("TURSO_URL", "").strip()
+            turso_token = os.getenv("TURSO_TOKEN", "").strip()
+            if not turso_url or not turso_token:
+                raise ValueError("TURSO_URL and TURSO_TOKEN must be set when DB_BACKEND=turso")
         
         return cls(
             bot_token=token,
@@ -60,15 +83,32 @@ class BotConfig:
             bot_name=os.getenv("BOT_NAME", "ToolNet Services")[:48],
             support_username=os.getenv("SUPPORT_USERNAME", "").lstrip("@"),
             db_path=os.getenv("DB_PATH", "./data/bot.sqlite3"),
-            db_backend=os.getenv("DB_BACKEND", "").strip().lower() or None,
+            db_backend=db_backend,
             bank_name=os.getenv("BANK_NAME", "").strip(),
             bank_account=os.getenv("BANK_ACCOUNT", "").strip(),
             bank_owner=os.getenv("BANK_OWNER", "").strip(),
-            engagement_api_url=os.getenv("ENGAGEMENT_API_URL", "http://toolnet-engagement:8000"),
-            engagement_api_token=os.getenv("ENGAGEMENT_API_TOKEN", ""),
+            engagement_api_url=engagement_api_url,
+            engagement_api_token=engagement_api_token,
             log_level=os.getenv("LOG_LEVEL", "INFO"),
         )
     
     @property
     def bank_configured(self) -> bool:
         return all([self.bank_name, self.bank_account, self.bank_owner])
+    
+    def safe_dict(self) -> dict:
+        """Return config dict with sensitive values masked for logging."""
+        return {
+            "bot_token": "***" + self.bot_token[-4:] if len(self.bot_token) > 4 else "***",
+            "admin_ids": list(self.admin_ids),
+            "bot_name": self.bot_name,
+            "support_username": self.support_username,
+            "db_path": self.db_path,
+            "db_backend": self.db_backend,
+            "bank_name": self.bank_name,
+            "bank_account": "***" + self.bank_account[-4:] if len(self.bank_account) > 4 else "***",
+            "bank_owner": self.bank_owner,
+            "engagement_api_url": self.engagement_api_url,
+            "engagement_api_token": "***" + self.engagement_api_token[-4:] if len(self.engagement_api_token) > 4 else "***",
+            "log_level": self.log_level,
+        }

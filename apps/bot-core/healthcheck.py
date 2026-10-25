@@ -63,8 +63,8 @@ def main() -> int:
             print("OK: Engagement API")
         else:
             print("WARN: Engagement API unreachable")
-    except Exception:
-        print("WARN: Engagement API check skipped")
+    except Exception as exc:
+        print(f"WARN: Engagement API check skipped: {exc}")
 
     return 0
 
