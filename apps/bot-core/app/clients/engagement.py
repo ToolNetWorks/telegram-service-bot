@@ -1,14 +1,15 @@
-"""Engagement API client for Bot Core."""
+"""HTTP client for the internal Engagement API.
+
+Bot Core uses this client for *all* engagement catalog data and provider order
+calls.  It contains no provider-specific rules, service IDs or prices.
+"""
 from __future__ import annotations
 
 import json
 import logging
-import time
 import urllib.error
 import urllib.request
 from dataclasses import dataclass
-from decimal import Decimal
-from typing import Any, Optional
 
 from app.core.config import BotConfig
 
@@ -20,39 +21,42 @@ class Platform:
     id: int
     slug: str
     name: str
-    name_en: str
-    enabled: bool
-    icon: str
-    sort_order: int | None = None
-    created_at: str | None = None
+    name_en: str = ""
+    enabled: bool = True
+    coming_soon: bool = False
+    icon: str = ""
+    sort_order: int = 0
+    visible: bool = True
 
 
 @dataclass
 class Category:
     id: int
     platform_id: int
+    platform_slug: str
     slug: str
     name: str
-    name_en: str
-    enabled: bool
-    provider_category_id: str
-    service_type: str
-    sort_order: int | None = None
-    created_at: str | None = None
+    name_en: str = ""
+    enabled: bool = True
+    coming_soon: bool = False
+    service_type: str = "engagement"
+    sort_order: int = 0
 
 
 @dataclass
 class ProviderService:
     id: int
     category_id: int
+    category_slug: str
+    platform_slug: str
     provider_id: str
     provider_service_id: str
     name: str
     min_quantity: int
     max_quantity: int
     rate_milli: int
-    status: str
-    created_at: str | None = None
+    status: str = "active"
+    cost_source: str = "provider"
 
 
 @dataclass
@@ -71,11 +75,17 @@ class OrderResult:
     error: str | None = None
     status: str | None = None
     reconciliation_required: bool = False
+    definitive: bool = True
 
 
 class EngagementAPIError(Exception):
-    """Engagement API error."""
-    pass
+    """Engagement API error with a safety classification."""
+
+    def __init__(self, message: str, *, definitive: bool = True, status_code: int | None = None):
+        super().__init__(message)
+        self.message = message
+        self.definitive = definitive
+        self.status_code = status_code
 
 
 class EngagementClient:
@@ -85,30 +95,47 @@ class EngagementClient:
         self.config = config
         self.base_url = config.engagement_api_url.rstrip("/")
         self.token = config.engagement_api_token
-        self.timeout = 30
+        self.timeout = 35
 
     def _request(self, method: str, path: str, json_data: dict | None = None) -> dict:
-        """Make HTTP request to Engagement API."""
         url = f"{self.base_url}{path}"
-        headers = {"Content-Type": "application/json", "X-Internal-Token": self.token}
-
-        data = json.dumps(json_data, ensure_ascii=False).encode("utf-8") if json_data else None
-
+        headers = {
+            "Content-Type": "application/json",
+            "Accept": "application/json",
+            "X-Internal-Token": self.token,
+        }
+        data = json.dumps(json_data, ensure_ascii=False).encode("utf-8") if json_data is not None else None
         request = urllib.request.Request(url, data=data, headers=headers, method=method)
+
         try:
             with urllib.request.urlopen(request, timeout=self.timeout) as response:
-                return json.load(response)
+                body = response.read().decode("utf-8")
+                return json.loads(body) if body else {}
         except urllib.error.HTTPError as exc:
+            detail = f"HTTP {exc.code}"
+            # 409 means another request with the same idempotency key is still
+            # in flight.  Its provider outcome is unknown, so it must never be
+            # treated as a definitive rejection/refund.
+            definitive = exc.code not in {408, 409, 425, 429} and exc.code < 500
             try:
-                detail = json.loads(exc.read().decode("utf-8")).get("detail", f"HTTP {exc.code}")
+                payload = json.loads(exc.read().decode("utf-8"))
+                detail = payload.get("detail", detail)
+                if isinstance(detail, list):
+                    detail = "; ".join(str(item) for item in detail)
             except (ValueError, OSError):
-                detail = f"HTTP {exc.code}"
-            raise EngagementAPIError(f"Engagement API {method} {path}: {detail}") from None
-        except (urllib.error.URLError, TimeoutError) as exc:
-            raise EngagementAPIError(f"Network error calling Engagement API: {exc}") from None
+                pass
+            raise EngagementAPIError(
+                f"Engagement API {method} {path}: {detail}",
+                definitive=definitive,
+                status_code=exc.code,
+            ) from None
+        except (urllib.error.URLError, TimeoutError, OSError, json.JSONDecodeError) as exc:
+            raise EngagementAPIError(
+                f"Network error calling Engagement API: {exc}",
+                definitive=False,
+            ) from None
 
     def health_check(self) -> bool:
-        """Check if Engagement API is healthy (ready to serve)."""
         try:
             result = self._request("GET", "/health/ready")
             return result.get("status") == "ready"
@@ -116,43 +143,32 @@ class EngagementClient:
             return False
 
     def health_dependencies(self) -> dict | None:
-        """Get dependency health status."""
         try:
             return self._request("GET", "/health/dependencies")
         except EngagementAPIError:
             return None
 
     def list_platforms(self) -> list[Platform]:
-        """Get all platforms."""
         result = self._request("GET", "/v1/platforms")
-        return [Platform(**p) for p in result.get("platforms", [])]
+        return [Platform(**item) for item in result.get("platforms", [])]
 
     def list_categories(self, platform_slug: str) -> list[Category]:
-        """Get categories for a platform."""
         result = self._request("GET", f"/v1/platforms/{platform_slug}/categories")
-        return [Category(**c) for c in result.get("categories", [])]
+        return [Category(**item) for item in result.get("categories", [])]
+
+    def get_category(self, category_id: int) -> Category | None:
+        result = self._request("GET", f"/v1/categories/{category_id}")
+        return Category(**result) if result else None
 
     def list_services(self, category_id: int) -> list[ProviderService]:
-        """Get provider services for a category."""
         result = self._request("GET", f"/v1/categories/{category_id}/services")
-        return [ProviderService(**s) for s in result.get("services", [])]
+        return [ProviderService(**item) for item in result.get("services", [])]
 
     def get_service(self, service_id: int) -> ProviderService | None:
-        """Get a single provider service."""
         result = self._request("GET", f"/v1/services/{service_id}")
-        if result:
-            return ProviderService(**result)
-        return None
+        return ProviderService(**result) if result else None
 
     def place_order(self, request: OrderRequest) -> OrderResult:
-        """Place an order via Engagement API.
-        
-        Properly handles:
-        - success=false responses (provider error)
-        - HTTP 200 with missing provider_order_id
-        - reconciliation_required flag
-        - pending_reconciliation status
-        """
         payload = {
             "service_id": request.service_id,
             "quantity": request.quantity,
@@ -161,54 +177,70 @@ class EngagementClient:
         }
         try:
             result = self._request("POST", "/v1/orders", payload)
-            
-            # CRITICAL: Always check the actual 'success' field, not HTTP status
-            api_success = result.get("success", False)
-            provider_order_id = result.get("provider_order_id")
-            charge_milli = result.get("charge_milli")
-            status = result.get("status")
-            error = result.get("error")
-            reconciliation_required = result.get("reconciliation_required", False)
-            
-            if not api_success:
-                # Provider returned success=false - this is a definitive failure
-                LOG.warning("Engagement API order failed: %s", error)
-                return OrderResult(
-                    success=False,
-                    error=error or "Provider rejected order",
-                    status=status,
-                )
-            
-            # API says success=true, but validate provider_order_id exists
-            if not provider_order_id:
-                LOG.error("Engagement API returned success=true but missing provider_order_id: %s", result)
-                return OrderResult(
-                    success=False,
-                    error="Provider order ID missing in success response",
-                    status=status,
-                )
-            
-            # Determine if this is a confirmed order or needs reconciliation
-            is_reconciliation = reconciliation_required or status == "pending_reconciliation"
-            
-            LOG.info("Order placed: provider_order_id=%s, status=%s, reconciliation=%s", 
-                     provider_order_id, status, is_reconciliation)
-            
-            return OrderResult(
-                success=True,
-                provider_order_id=provider_order_id,
-                charge_milli=charge_milli,
-                status=status,
-                reconciliation_required=is_reconciliation,
-            )
         except EngagementAPIError as exc:
-            LOG.error("Engagement API error placing order: %s", exc)
-            return OrderResult(success=False, error=str(exc))
+            # A transport/5xx failure is ambiguous: the provider may have
+            # accepted the order.  A 4xx is a definitive rejection.
+            return OrderResult(
+                success=False,
+                error=exc.message,
+                definitive=exc.definitive,
+                status=None if exc.definitive else "pending_reconciliation",
+                reconciliation_required=not exc.definitive,
+            )
 
-    def get_order_status(self, provider_order_id: str) -> dict | None:
-        """Get order status from provider."""
+        if "success" not in result:
+            LOG.error("Engagement API returned a malformed order response: %s", result)
+            return OrderResult(
+                success=False,
+                error="Malformed Engagement API order response",
+                status="pending_reconciliation",
+                definitive=False,
+                reconciliation_required=True,
+            )
+
+        api_success = bool(result.get("success", False))
+        provider_order_id = result.get("provider_order_id")
+        charge_milli = result.get("charge_milli")
+        status = result.get("status")
+        error = result.get("error")
+        # Missing classification is treated as ambiguous, never as a refund.
+        definitive = bool(result.get("definitive", False))
+        reconciliation = bool(result.get("reconciliation_required", False))
+
+        if not api_success:
+            LOG.warning("Engagement API order failed definitive=%s: %s", definitive, error)
+            return OrderResult(
+                success=False,
+                error=error or "Provider rejected order",
+                status=status,
+                definitive=definitive,
+                reconciliation_required=reconciliation or not definitive,
+            )
+
+        if not provider_order_id:
+            LOG.error("Engagement API returned success=true without provider_order_id")
+            return OrderResult(
+                success=False,
+                error="Provider order ID missing in success response",
+                status="pending_reconciliation",
+                definitive=False,
+                reconciliation_required=True,
+            )
+
+        return OrderResult(
+            success=True,
+            provider_order_id=str(provider_order_id),
+            charge_milli=charge_milli,
+            status=status,
+            definitive=definitive,
+            reconciliation_required=reconciliation or status == "pending_reconciliation",
+        )
+
+    def get_order_status(self, provider_order_id: str, provider: str) -> dict | None:
         try:
-            result = self._request("GET", f"/v1/orders/{provider_order_id}/status")
-            return result
+            return self._request(
+                "GET",
+                f"/v1/orders/{provider_order_id}/status?provider={provider}",
+            )
         except EngagementAPIError:
             return None

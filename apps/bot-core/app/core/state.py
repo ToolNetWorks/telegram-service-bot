@@ -58,10 +58,17 @@ class StateManager:
     
     def get_state(self, user_id: int) -> UserState:
         """Get current user state."""
-        user = self.db.get_user(user_id)
-        if not user:
+        row = self.db.fetchone(
+            "SELECT state, state_data FROM users WHERE user_id=?",
+            (user_id,),
+        )
+        if not row:
             return UserState(name="", data={})
-        return UserState.from_db(user["state"], user["state_data"])
+        state = UserState.from_db(row["state"], row["state_data"])
+        if state.is_expired():
+            self.clear_state(user_id)
+            return UserState(name="", data={})
+        return state
     
     def clear_state(self, user_id: int) -> None:
         """Clear user state."""
@@ -105,3 +112,6 @@ class States:
     TG_MEMBER_LINK = "tg_member_link"
     TG_MEMBER_QTY = "tg_member_qty"
     TG_MEMBER_CONFIRM = "tg_member_confirm"
+    ENGAGEMENT_LINK = "engagement_link"
+    ENGAGEMENT_QTY = "engagement_qty"
+    ENGAGEMENT_CONFIRM = "engagement_confirm"

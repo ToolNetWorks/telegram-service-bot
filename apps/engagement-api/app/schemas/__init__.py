@@ -1,78 +1,61 @@
-"""Pydantic schemas for Engagement API."""
+"""Pydantic v2 API schemas for the Engagement API."""
 from __future__ import annotations
 
 from datetime import datetime
-from decimal import Decimal
-from typing import Optional, List, Literal
-from pydantic import BaseModel, Field, ConfigDict
+from typing import Literal
+
+from pydantic import BaseModel, ConfigDict, Field
 
 
-class PlatformBase(BaseModel):
+class PlatformRead(BaseModel):
+    id: int
     slug: str
     name: str
     name_en: str = ""
-    enabled: bool = True
-    sort_order: int = 0
     icon: str = ""
-
-
-class PlatformCreate(PlatformBase):
-    pass
-
-
-class PlatformRead(PlatformBase):
-    id: int
-    created_at: datetime
+    sort_order: int = 0
+    enabled: bool = True
+    coming_soon: bool = False
+    visible: bool = True
 
     model_config = ConfigDict(from_attributes=True)
 
 
-class CategoryBase(BaseModel):
+class CategoryRead(BaseModel):
+    id: int
+    platform_id: int
+    platform_slug: str
     slug: str
     name: str
     name_en: str = ""
-    enabled: bool = True
     sort_order: int = 0
-    provider_category_id: str = ""
-    service_type: str = "member"
-
-
-class CategoryCreate(CategoryBase):
-    platform_id: int
-
-
-class CategoryRead(CategoryBase):
-    id: int
-    platform_id: int
-    created_at: datetime
+    enabled: bool = True
+    coming_soon: bool = False
+    service_type: str = "engagement"
 
     model_config = ConfigDict(from_attributes=True)
 
 
-class ProviderServiceBase(BaseModel):
-    provider_id: str = "vietnamfb"
+class ProviderServiceRead(BaseModel):
+    id: int
+    category_id: int
+    category_slug: str
+    platform_slug: str
+    provider_id: str
     provider_service_id: str
     name: str
-    min_quantity: int = 1
-    max_quantity: int = 1000000
-    rate_milli: int = 0
+    min_quantity: int
+    max_quantity: int
+    # Provider cost in 1/1000 VND per 1000 units.  Never a sale price.
+    rate_milli: int
     status: Literal["active", "inactive"] = "active"
-
-
-class ProviderServiceCreate(ProviderServiceBase):
-    category_id: int
-
-
-class ProviderServiceRead(ProviderServiceBase):
-    id: int
-    category_id: int
-    created_at: datetime
+    cost_source: Literal["provider", "configured"] = "provider"
 
     model_config = ConfigDict(from_attributes=True)
 
 
 class OrderCreate(BaseModel):
-    service_id: int
+    service_id: int = Field(gt=0)
     quantity: int = Field(gt=0)
     link: str = Field(min_length=1, max_length=500)
     idempotency_key: str = Field(min_length=1, max_length=128)
@@ -80,42 +63,66 @@ class OrderCreate(BaseModel):
 
 class OrderResult(BaseModel):
     success: bool
-    provider_order_id: Optional[str] = None
-    charge_milli: Optional[int] = None
-    status: Optional[str] = None
-    error: Optional[str] = None
+    # False means the provider outcome is unknown; Bot Core must reconcile.
+    definitive: bool = True
+    provider_order_id: str | None = None
+    charge_milli: int | None = None
+    status: str | None = None
+    error: str | None = None
+    reconciliation_required: bool = False
 
 
 class OrderStatus(BaseModel):
     provider_order_id: str
+    provider: str
     status: str
-    completed_quantity: Optional[int] = None
-    charge_milli: Optional[int] = None
-    started_at: Optional[datetime] = None
-    completed_at: Optional[datetime] = None
-    error_message: Optional[str] = None
+    completed_quantity: int | None = None
+    charge_milli: int | None = None
+    started_at: datetime | None = None
+    completed_at: datetime | None = None
+    error_message: str | None = None
+
+
+class HealthLiveResponse(BaseModel):
+    status: Literal["alive"]
+    timestamp: datetime
+
+
+class HealthReadyResponse(BaseModel):
+    status: Literal["ready", "not_ready"]
+    timestamp: datetime
+    catalog: Literal["loaded", "unavailable"]
+    providers_configured: int
+    providers_total: int
+
+
+class HealthDependenciesResponse(BaseModel):
+    timestamp: datetime
+    status: Literal["healthy", "degraded", "unhealthy"]
+    providers: dict[str, Literal["ok", "error", "not_configured"]]
 
 
 class HealthResponse(BaseModel):
+    """Backward-compatible aggregate health response."""
+
     status: Literal["healthy", "degraded", "unhealthy"]
     timestamp: datetime
-    database: Literal["connected", "disconnected"]
-    database_backend: str
-    providers: dict[str, Literal["ok", "error"]]
+    providers: dict[str, Literal["ok", "error", "not_configured"]]
 
 
 class ErrorResponse(BaseModel):
     detail: str
-    correlation_id: Optional[str] = None
+    correlation_id: str | None = None
+    definitive: bool | None = None
 
 
 class PlatformsResponse(BaseModel):
-    platforms: List[PlatformRead]
+    platforms: list[PlatformRead]
 
 
 class CategoriesResponse(BaseModel):
-    categories: List[CategoryRead]
+    categories: list[CategoryRead]
 
 
 class ServicesResponse(BaseModel):
-    services: List[ProviderServiceRead]
+    services: list[ProviderServiceRead]

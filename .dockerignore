@@ -3,19 +3,31 @@
 .env
 .env.local
 .env.*.local
+# App-level env files must never enter images built from the repo root.
+apps/**/.env
+apps/**/.env.local
+apps/**/.env.*
+!apps/**/.env.example
 
 # Data and databases (use persistent volume)
 data/
 *.sqlite3
 *.sqlite3-*
 *.db
+apps/**/data/
+apps/**/*.sqlite3
+apps/**/*.sqlite3-*
+apps/**/*.db
 
 # Logs
 logs/
 *.log
+apps/**/*.log
 
 # Backups
 backups/
+apps/**/backups/
+apps/**/*.bak
 
 # Python
 __pycache__/
@@ -25,12 +37,23 @@ __pycache__/
 .pytest_cache/
 .coverage
 *.cover
+apps/**/__pycache__/
+apps/**/*.pyc
+apps/**/*.pyo
+apps/**/*.pyd
+apps/**/.pytest_cache/
+apps/**/.coverage
 
 # Testing
 htmlcov/
 .tox/
 .mypy_cache/
 *.egg-info/
+apps/**/tests/
+apps/**/htmlcov/
+apps/**/.tox/
+apps/**/.mypy_cache/
+apps/**/*.egg-info/
 
 # IDE/Editor
 .vscode/

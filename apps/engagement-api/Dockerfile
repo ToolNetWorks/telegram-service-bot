@@ -4,41 +4,29 @@
 
 FROM python:3.12-slim
 
-# Install system dependencies
 RUN apt-get update && apt-get install -y --no-install-recommends \
     curl \
     && rm -rf /var/lib/apt/lists/*
 
-# Create non-root user
 RUN groupadd -r apiuser && useradd -r -g apiuser apiuser
 
-# Set working directory
 WORKDIR /app
 
-# Copy Python dependencies first (for better cache)
 COPY apps/engagement-api/requirements.txt /app/requirements.txt
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Copy application code AND turso_client from root
+# Stateless service: no Turso client and no local database are copied.
 COPY apps/engagement-api/ /app/
-COPY turso_client.py /app/turso_client.py
 
-# Create data directory for SQLite (dev/test only)
-RUN mkdir -p /data && chown -R apiuser:apiuser /data /app
-
-# Switch to non-root user
+RUN chown -R apiuser:apiuser /app
 USER apiuser
 
-# Environment variables
 ENV PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1
 
-# Expose port
 EXPOSE 8000
 
-# Health check
 HEALTHCHECK --interval=30s --timeout=10s --start-period=10s --retries=3 \
-    CMD curl -f http://localhost:8000/health || exit 1
+    CMD curl -fsS http://localhost:8000/health/live || exit 1
 
-# Run the API with proper module imports
 ENTRYPOINT ["python3", "-m", "app.main"]

@@ -37,7 +37,12 @@ class Database:
         
         if self.backend in (None, "turso"):
             turso = self._get_turso_config()
-            if turso and TURSO_AVAILABLE:
+            if turso:
+                if not TURSO_AVAILABLE:
+                    raise RuntimeError(
+                        "Turso is configured but turso_client is not available; "
+                        "refusing to fall back to SQLite"
+                    )
                 url, token = turso
                 try:
                     self._conn = TursoConnection(url, token)
@@ -45,9 +50,9 @@ class Database:
                     LOG.info("Database backend: Turso (remote)")
                     return
                 except TursoError as exc:
-                    if self.backend == "turso":
-                        raise RuntimeError(f"Cannot connect to Turso: {exc}") from exc
-                    LOG.warning("Turso connection failed, falling back to SQLite: %s", exc)
+                    # Never silently fall back to a local SQLite file when
+                    # Turso credentials are present in production.
+                    raise RuntimeError(f"Cannot connect to Turso: {exc}") from exc
         
         # SQLite fallback
         Path(config.db_path).parent.mkdir(parents=True, exist_ok=True)

@@ -1,43 +1,48 @@
-# Northflank Deployment Guide — ToolNet Telegram Service Bot (Turso)
+# Northflank Deployment Guide — ToolNet V3 (Bot Core + Engagement API)
 
 ## 1. Kiến trúc production
 
-- **Northflank Worker service**, Telegram **long polling**.
-- **Không public port**.
-- **Đúng 1 replica** (không bao giờ chạy 2 nơi cùng `getUpdates`).
-- **Không cần Persistent Volume** cho database: dữ liệu nằm trên **Turso**.
-- Container chạy non-root, có `SIGTERM` graceful shutdown, health check DB.
-- Nếu `TURSO_URL` + `TURSO_TOKEN` được đặt, bot **chỉ** dùng Turso.
-  Không có fallback âm thầm sang SQLite. Turso lỗi → bot dừng và để
-  Northflank restart; dữ liệu không bị ghi nhầm vào file local.
+V3 tách thành **hai service độc lập** trong cùng Northflank project:
 
 ```
-Telegram  <--long poll-->  Northflank Worker (1 replica)
-                                  |
-                                  +--> Turso (libSQL, HTTPS/Hrana v2)
-                                  +--> VietnamFB API (đặt đơn)
+Telegram
+   |
+   v
+toolnet-bot-core (Worker, 1 replica)
+   |-- Turso (users, wallet, orders, ledger, deposits, settings)
+   |
+   +--> toolnet-engagement (private HTTP :8000)
+             |
+             +--> VietnamFB API (provider orders/status)
 ```
 
-> **Chọn region Northflank gần Turso** (database đang ở
-> `aws-eu-west-1`). Nên chọn Europe/EU. Mỗi truy vấn Turso là một HTTPS
-> request; đặt worker ở EU giúp giảm độ trễ từ ~1s (VPS châu Á) xuống
-> vài chục ms.
+- **Bot Core**: Telegram long polling, không public port, đúng **1 replica**.
+- **Engagement API**: FastAPI **stateless**, chỉ mở port nội bộ `8000`, có thể chạy 1+ replica.
+- Bot Core **không** giữ `VIETNAMFB_API_KEY` và không hardcode provider/service ID.
+- Engagement API **không** giữ Turso token và không lưu đơn hàng/customer data.
+- Durable idempotency và toàn bộ giao dịch tài chính nằm ở Bot Core/Turso.
+- Nếu `TURSO_URL` + `TURSO_TOKEN` được đặt, Bot Core chỉ dùng Turso; không fallback SQLite âm thầm.
+
+> Chọn region Northflank gần Turso (database đang ở `aws-eu-west-1`, nên dùng Europe/EU).
+> Mỗi truy vấn Turso là một HTTPS request; đặt worker gần DB giúp giảm độ trễ.
 
 ---
 
 ## 2. Biến môi trường trên Northflank
 
-### Secrets (bắt buộc)
+### 2.1 Bot Core (`toolnet-bot-core`)
+
+Secrets bắt buộc:
 
 | Biến | Ý nghĩa |
 |---|---|
 | `BOT_TOKEN` | Token BotFather |
 | `ADMIN_IDS` | Danh sách user ID admin, phân tách bằng dấu phẩy |
-| `VIETNAMFB_API_KEY` | API key VietnamFB |
 | `TURSO_URL` | `libsql://...` hoặc `https://...` của database |
 | `TURSO_TOKEN` | Token Turso (quyền đọc/ghi) |
+| `ENGAGEMENT_API_TOKEN` | Shared secret gọi Engagement API |
 
-### Config (không bí mật)
+Config:
 
 | Biến | Mặc định |
 |---|---|
@@ -45,10 +50,29 @@ Telegram  <--long poll-->  Northflank Worker (1 replica)
 | `SUPPORT_USERNAME` | (rỗng) |
 | `LOG_LEVEL` | `INFO` |
 | `BANK_NAME`, `BANK_ACCOUNT`, `BANK_OWNER` | (rỗng — chỉ mở nạp tiền khi đủ 3) |
-| `VIETNAMFB_BASE_URL` | `https://vietnamfb.com` |
+| `ENGAGEMENT_API_URL` | `http://toolnet-engagement:8000` |
+| `DB_BACKEND` | `turso` |
 
-Không cần đặt `DB_PATH` khi dùng Turso. `DB_PATH` chỉ dùng cho dev/test
-hoặc rollback SQLite.
+**Không đặt trên Bot Core:** `VIETNAMFB_API_KEY`, `VIETNAMFB_BASE_URL`,
+`ENGAGEMENT_INTERNAL_TOKEN`.
+
+### 2.2 Engagement API (`toolnet-engagement`)
+
+| Biến | Bắt buộc | Ý nghĩa |
+|---|---|---|
+| `ENVIRONMENT` | Có | `production` (fail-fast nếu thiếu provider key) |
+| `ENGAGEMENT_INTERNAL_TOKEN` | Có | Phải trùng `ENGAGEMENT_API_TOKEN` của Bot Core |
+| `VIETNAMFB_API_KEY` | Có (production) | API key VietnamFB |
+| `VIETNAMFB_BASE_URL` | Không | Mặc định `https://vietnamfb.com` |
+| `HOST` | Không | `0.0.0.0` |
+| `PORT` | Không | `8000` |
+| `LOG_LEVEL` | Không | `INFO` |
+| `REQUEST_TIMEOUT` / `CONNECT_TIMEOUT` | Không | `20` / `5` giây |
+| `MAX_RETRIES` | Không | `2` (chỉ cho call đọc; **không retry** `add`) |
+| `PROVIDER_CACHE_TTL` | Không | `300` giây |
+
+**Không đặt trên Engagement API:** `TURSO_URL`, `TURSO_TOKEN`,
+`DATABASE_URL`, `DATABASE_TOKEN`, `BOT_TOKEN`, `ADMIN_IDS`.
 
 **Không commit `.env`, backup, database hay token vào git.**
 
@@ -56,25 +80,47 @@ hoặc rollback SQLite.
 
 ## 3. Kiểm tra trước khi deploy
 
-Chạy trên VPS (bot production vẫn đang chạy trong bước này):
-
 ```bash
 cd ~/telegram-service-bot
-python3 -m unittest discover -s tests -v          # 32 test, không gọi API thật
-python3 tests/turso_live_check.py                 # kết nối + transaction thật
-python3 tests/turso_app_check.py                  # end-to-end với provider mock
-python3 migrate_to_turso.py --verify-only         # so sánh SQLite ↔ Turso
+
+# Bot Core: UI, order safety, client -> API -> mock provider
+cd apps/bot-core && python3 -m pytest tests -q && cd ../..
+
+# Engagement API: contract, auth, catalog, provider classification
+cd apps/engagement-api && ENVIRONMENT=test \
+  ENGAGEMENT_INTERNAL_TOKEN=test_token python3 -m pytest tests -q && cd ../..
+
+# Legacy root bot regression tests
+python3 -m pytest tests -q
+
+# Turso connectivity (không in token)
+python3 tests/turso_live_check.py
+python3 migrate_to_turso.py --verify-only
 ```
 
-Kết quả mong đợi: tất cả `OK`, `MIGRATE THÀNH CÔNG`, không có token
-trong log.
+Kết quả mong đợi: tất cả test PASS, `--verify-only` PASS, không có token trong log.
 
 Build và smoke test Docker:
 
 ```bash
-sudo docker build -t telegram-service-bot .
-sudo ./docker-smoke-test.sh
+docker build -t toolnet-bot-core -f apps/bot-core/Dockerfile .
+docker build -t toolnet-engagement -f apps/engagement-api/Dockerfile .
 ```
+
+Smoke test Engagement API (không gọi provider thật):
+
+```bash
+docker run --rm -d --name engagement-smoke \
+  -e ENVIRONMENT=test \
+  -e ENGAGEMENT_INTERNAL_TOKEN=smoke-token \
+  -e VIETNAMFB_API_KEY=smoke-key \
+  -p 18000:8000 toolnet-engagement
+curl -fsS http://127.0.0.1:18000/health/live
+curl -fsS -H "X-Internal-Token: smoke-token" http://127.0.0.1:18000/v1/platforms
+docker rm -f engagement-smoke
+```
+
+Smoke test Bot Core nên dùng bot token test riêng và **không** bấm xác nhận đơn provider.
 
 ---
 
@@ -97,63 +143,98 @@ python3 migrate_to_turso.py --verify-only
 Script **từ chối** ghi đè nếu Turso đã có users/orders/ledger mà không
 có `--replace`. SQLite gốc không bao giờ bị xoá/sửa.
 
+> V3 không tạo database riêng cho Engagement API. Không chạy migration
+> engagement catalog trên Turso nữa; catalog do Engagement API quản lý.
+
 ---
 
 ## 5. Tạo service trên Northflank
 
+### 5.1 Bot Core
+
 1. **Create service → Worker**.
 2. **Repository**: `ToolNetWorks/telegram-service-bot`, branch `master`.
-3. **Build**: Dockerfile.
+3. **Build**: Dockerfile `apps/bot-core/Dockerfile`, build context `/`.
 4. **Ports**: không tạo public port.
 5. **Replicas**: `1` (cố định).
 6. **Persistent volume**: không cần.
 7. **Region**: Europe (gần Turso `aws-eu-west-1`).
 8. **Restart policy**: `Always` / `On failure`.
 9. **Termination grace period**: `30s` (long poll timeout 25s).
-10. Thêm toàn bộ Secrets/Config ở mục 2.
-11. **Health check**: Dockerfile đã có
-    `HEALTHCHECK CMD ["python3","healthcheck.py"]`.
-    Nếu Northflank hỗ trợ command health check, dùng:
-    `python3 healthcheck.py` (timeout 15s, interval 60s).
+10. Thêm toàn bộ Secrets/Config ở mục 2.1.
+11. **Health check**: dùng `python3 healthcheck.py` nếu Northflank hỗ trợ
+    command health check; Dockerfile cũng có `HEALTHCHECK`.
 12. **Logging**: stdout/stderr; không log token/URL.
 
-Deploy nhưng **chưa start** (hoặc start với replicas=0) cho đến bước
-cutover.
+### 5.2 Engagement API
 
-### 5.1 Trạng thái production hiện tại (2026-10-24)
+1. **Create service → Worker/Service** (không public).
+2. **Repository**: `ToolNetWorks/telegram-service-bot`, branch `master`.
+3. **Build**: Dockerfile `apps/engagement-api/Dockerfile`, build context `/`.
+4. **Port**: `8000`, **internal/private only**.
+5. **Replicas**: `1` hoặc nhiều hơn (stateless).
+6. **Persistent volume**: không cần.
+7. **Health check**: `GET /health/live` (Dockerfile đã có `HEALTHCHECK`).
+8. Thêm toàn bộ Secrets/Config ở mục 2.2.
+9. **Không** thêm Turso credentials.
 
-| Mục | Giá trị |
+### 5.3 Kết nối nội bộ
+
+**Trường hợp 1: Cùng Northflank project/team (khuyên dùng)**
+- Hai service cùng project → private DNS hoạt động.
+- Bot Core dùng `ENGAGEMENT_API_URL=http://toolnet-engagement:8000`.
+- `ENGAGEMENT_API_TOKEN` (Bot Core) = `ENGAGEMENT_INTERNAL_TOKEN` (Engagement API).
+- Kiểm tra từ Bot Core container:
+
+```bash
+curl -fsS -H "X-Internal-Token: $ENGAGEMENT_API_TOKEN" \
+  http://toolnet-engagement:8000/v1/platforms
+```
+
+**Trường hợp 2: Khác Northflank project/team (private DNS KHÔNG hoạt động)**
+- Northflank private networking **chỉ hoạt động trong cùng project**.
+- Phải expose Engagement API qua **public HTTPS endpoint** có authentication.
+- Cấu hình Engagement API:
+  - Bật **Public Port** `8000` trên Northflank.
+  - Northflank tự cấp domain `https://<service>-<project>.northflank.app` + TLS.
+- Cấu hình Bot Core:
+  - `ENGAGEMENT_API_URL=https://<engagement-service>-<project>.northflank.app`
+  - Token `ENGAGEMENT_API_TOKEN` vẫn phải khớp `ENGAGEMENT_INTERNAL_TOKEN`.
+- Kiểm tra từ Bot Core container:
+
+```bash
+curl -fsS -H "X-Internal-Token: $ENGAGEMENT_API_TOKEN" \
+  https://<engagement-service>-<project>.northflank.app/v1/platforms
+```
+
+> ⚠️ **Bảo mật**: Engagement API **chỉ** chấp nhận request có header `X-Internal-Token` hợp lệ. Không cần IP allowlist thêm vì token đã đủ mạnh (shared secret 32+ chars, so sánh timing-safe). Không public Swagger/docs ở production (`docs_url=None` khi `ENVIRONMENT=production`).
+
+### 5.4 Trạng thái production trước V3 (tham khảo lịch sử)
+
+| Mục | Giá trị cũ |
 |---|---|
 | Northflank project | `default` (team `telegram-service-bots-team`) |
 | Service | `telegram-service-bot` |
 | Region | `europe-west` (GCP `europe-west2`) |
-| Plan | `nf-compute-20` (0.2 vCPU / 512 MB) |
 | Build | GitHub `ToolNetWorks/telegram-service-bot`, branch `master`, `/Dockerfile` |
-| Image commit | `29c4bf7` |
 | Replicas | `1` |
 | Public port | Không |
-| CI | Đã tắt (`disabledCI=true`) để tránh auto-deploy ngoài ý muốn |
-| Rollout | `recreate` — container cũ dừng trước khi container mới start |
-| Health check | CMD `python3 healthcheck.py`, liveness, 60s/lần, timeout 20s, 3 lần fail |
+| Rollout | `recreate` |
 | Turso | `aws-eu-west-1` |
-| VPS | Đã dừng bot; `botctl.sh start` bị chặn nếu `TURSO_URL` có trong `.env` |
 
-Backup trước cutover: `backups/bot.sqlite3.20261024-024100.backup`
-Rollback snapshot sau cutover: `backups/rollback-20261024-024459.sqlite3`
-
-> Sau cutover, **Turso là nguồn dữ liệu chính**. Không chạy
-> `migrate_to_turso.py --replace` từ SQLite VPS nữa (SQLite đã cũ).
-> Nếu cần rollback, dùng `migrate_from_turso.py` để export Turso → SQLite.
+Đây là cấu hình **single-service cũ**. V3 cần service Engagement API riêng và
+Bot Core chuyển sang Dockerfile `apps/bot-core/Dockerfile`. Không thay đổi
+Northflank cho đến khi có approval và đã xác minh CI/CD.
 
 ---
 
-## 6. Cutover an toàn (một chiều)
+## 6. Rollout V3 an toàn
 
-> Điều kiện tiên quyết: Docker tests PASS, `--verify-only` PASS, đã có
-> backup SQLite, Northflank service sẵn sàng.
+> Điều kiện tiên quyết: Docker builds PASS, test PASS, đã có backup Turso,
+> service Engagement API đã tạo và health check OK.
 
 ```bash
-# 1. Trên VPS: dừng bot, đảm bảo không còn process polling
+# 1. Trên VPS: dừng bot cũ, đảm bảo không còn process polling
 cd ~/telegram-service-bot
 ./botctl.sh stop
 ./botctl.sh status
@@ -162,42 +243,42 @@ pgrep -af "python3 -m bot" || echo "VPS bot stopped"
 # 2. Backup cuối cùng (WAL-safe)
 ./backup-sqlite.sh
 
-# 3. Đồng bộ snapshot cuối lên Turso
+# 3. Đồng bộ snapshot cuối lên Turso (chỉ lần đầu)
 python3 migrate_to_turso.py --replace --yes
 python3 migrate_to_turso.py --verify-only
 
-# 4. Trên Northflank: scale service lên 1 replica / bấm Deploy
-#    (chỉ sau khi bước 1 đã xác nhận VPS không còn polling)
-
-# 5. Theo dõi log Northflank
+# 4. Deploy Engagement API trước, kiểm tra /health/ready và /v1/platforms
+# 5. Deploy Bot Core với ENGAGEMENT_API_URL trỏ tới service mới
+# 6. Theo dõi log Bot Core:
 #    "Database backend: Turso (remote)"
-#    "Bot @ToolNettBot đã hoạt động, admin count=1"
+#    "Bot @... đã hoạt động"
 ```
 
-> Quy trình trên chỉ dùng cho **lần cutover đầu tiên**. Sau khi Northflank
-> đã chạy, không migrate SQLite → Turso nữa; SQLite VPS đã cũ. Xem mục 5.1.
-
-### Kiểm tra sau cutover
+### Kiểm tra sau rollout
 
 - `/start` → xác minh captcha → menu inline.
-- Ví, Tool Access, Engagement, Telegram Members (chỉ mở báo giá;
-  **không bấm xác nhận** khi API balance = 0).
-- Đơn của tôi, ngôn ngữ, Admin `/admin`.
+- **Tool Access → Engagement Services** hiển thị đủ 6 nền tảng.
+- **Telegram → Member Telegram** hiển thị đúng gói và giá sale (markup).
+- **Telegram → View Telegram** hiển thị “đang cập nhật”, không tạo đơn giả.
+- Các nền tảng chưa có provider hiển thị Coming Soon.
+- Ví, nạp tiền, đơn của tôi, ngôn ngữ, Admin `/admin`.
+- Không bấm xác nhận đơn provider thật khi chưa kiểm tra balance/provider.
 - Log không có traceback Turso, không có token.
 
 ### Quy tắc tuyệt đối
 
-- Không bật Northflank khi VPS còn polling.
+- Không bật Northflank Bot Core khi VPS còn polling.
 - Không bật lại VPS khi Northflank đang chạy.
-- Nếu cần kiểm tra song song, chỉ dùng môi trường test với bot token
-  khác.
+- Nếu cần kiểm tra song song, chỉ dùng môi trường test với bot token khác.
+- Không đặt `VIETNAMFB_API_KEY` trên Bot Core.
+- Không đặt `TURSO_TOKEN` trên Engagement API.
 
 ---
 
 ## 7. Rollback
 
 ```bash
-# 1. Northflank: scale về 0 (dừng polling ngay)
+# 1. Northflank: scale Bot Core về 0 (dừng polling ngay)
 
 # 2. Nếu Northflank đã phát sinh giao dịch mới: export Turso -> SQLite
 cd ~/telegram-service-bot
@@ -210,13 +291,12 @@ python3 migrate_from_turso.py
 DB_BACKEND=sqlite ./botctl.sh start
 ```
 
-- `DB_BACKEND=sqlite` là lựa chọn **tường minh** để bỏ qua Turso khi
-  rollback. Không đặt biến này trên Northflank.
-- Nếu không có giao dịch mới trên Turso, có thể dùng backup SQLite
-  trước cutover thay cho bước export.
-- Luôn giữ backup trước cutover ở `backups/` (đã được `.gitignore`).
-- Sau rollback, xác nhận Northflank đã scale 0 và không còn gọi
-  `getUpdates`.
+- `DB_BACKEND=sqlite` là lựa chọn **tường minh** để bỏ qua Turso khi rollback.
+  Không đặt biến này trên Northflank production.
+- Nếu không có giao dịch mới trên Turso, có thể dùng backup SQLite trước
+  rollout thay cho bước export.
+- Luôn giữ backup trước rollout ở `backups/` (đã được `.gitignore`).
+- Sau rollback, xác nhận Northflank đã scale 0 và không còn gọi `getUpdates`.
 
 ---
 
@@ -227,17 +307,21 @@ DB_BACKEND=sqlite ./botctl.sh start
 | Bot không trả lời, log `Turso từ chối xác thực` | Sai/hết hạn `TURSO_TOKEN` |
 | Log `Turso lỗi kết nối` | Mạng Northflank → Turso, region, timeout |
 | Bot restart liên tục | `healthcheck.py` fail hoặc thiếu ENV bắt buộc |
-| `Không kết nối được Turso` lúc start | Không fallback SQLite; sửa ENV rồi restart |
-| Đơn provider “Chờ đối soát” | Admin kiểm tra panel; hoàn tiền bằng `/reject <order_id>` nếu provider chưa nhận |
+| Menu Engagement báo tạm thời không khả dụng | `ENGAGEMENT_API_URL`, token, service Engagement API |
+| `/health/ready` trả 503 | Thiếu `VIETNAMFB_API_KEY` hoặc catalog lỗi |
+| `/health/dependencies` báo provider `error` | Provider outage; catalog vẫn dùng fallback cost |
+| Đơn provider “Chờ đối soát” | Admin kiểm tra panel; nếu provider chưa nhận, hoàn tiền thủ công theo quy trình đối soát (không dùng `/reject` — lệnh đó dành cho deposit) |
 | Hai bot tranh `getUpdates` | Scale Northflank 0 hoặc stop VPS ngay |
+| `401 Invalid internal token` | `ENGAGEMENT_API_TOKEN` ≠ `ENGAGEMENT_INTERNAL_TOKEN` |
 
 ### Bảo vệ giao dịch
 
 - `claim_state` nguyên tử: bấm xác nhận 2 lần chỉ tạo 1 đơn.
 - Order nội bộ + trừ ví + ledger nằm trong **một transaction** Turso.
-- `request_key` UNIQUE chống trùng; ledger có UNIQUE(kind, reference).
+- `orders.request_key` UNIQUE chống trùng; ledger có UNIQUE(kind, reference).
 - Provider trả order id → mới ghi `provider_orders`.
 - Provider từ chối rõ ràng → hoàn tiền đúng 1 lần.
 - Timeout/mất kết nối provider → giữ tiền, đánh dấu
   `pending_reconciliation`, cảnh báo admin; không hoàn tiền mù.
 - Provider đã nhận đơn nhưng lỗi ghi DB → không hoàn tiền; admin đối soát.
+- `POST /v1/orders` không bao giờ retry ở provider; chỉ retry call đọc.

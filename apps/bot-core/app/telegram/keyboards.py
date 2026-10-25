@@ -1,4 +1,8 @@
-"""Inline keyboard builders for Bot Core."""
+"""Inline keyboard builders for Bot Core.
+
+Keyboard builders only render data returned by the Engagement API.  They do not
+contain platform, category, service or provider price lists.
+"""
 from __future__ import annotations
 
 from typing import Any
@@ -15,7 +19,6 @@ def keyboard(*rows: tuple[tuple[str, str], ...]) -> dict[str, Any]:
 
 
 def build_home_keyboard(t) -> dict[str, Any]:
-    """Build main menu keyboard."""
     return keyboard(
         ((t("wallet"), "wallet"),),
         ((t("tools"), "tools"),),
@@ -26,7 +29,6 @@ def build_home_keyboard(t) -> dict[str, Any]:
 
 
 def build_tools_keyboard(t) -> dict[str, Any]:
-    """Build Tool Access menu keyboard."""
     return keyboard(
         ((t("report"), "tools:report"), (t("engagement"), "tools:engagement")),
         ((t("tool_buy"), "tools:buy"), (t("tool_sub"), "tools:sub")),
@@ -34,92 +36,109 @@ def build_tools_keyboard(t) -> dict[str, Any]:
     )
 
 
-def build_engagement_platforms_keyboard(t, platforms: list[dict]) -> dict[str, Any]:
-    """Build engagement platforms grid (2 columns)."""
-    rows = []
-    for i in range(0, len(platforms), 2):
-        row = []
-        p1 = platforms[i]
-        slug1 = p1.get("slug", "")
-        if p1.get("enabled", True):
-            label1 = f"{p1.get('icon', '')} {t(f'engagement_{slug1}')}"
-            row.append((label1, f"engagement:platform:{slug1}"))
-        else:
-            label1 = f"{p1.get('icon', '')} {t(f'engagement_{slug1}')} {t('engagement_coming_soon')}"
-            row.append((label1, f"engagement:coming_soon:{slug1}"))
+def _platform_label(t, platform: dict) -> str:
+    slug = platform.get("slug", "")
+    name = t(f"engagement_{slug}") if t(f"engagement_{slug}") != f"engagement_{slug}" else platform.get("name", slug)
+    icon = platform.get("icon", "")
+    label = f"{icon} {name}".strip()
+    if not platform.get("enabled", True) or platform.get("coming_soon", False):
+        label = f"{label} {t('engagement_coming_soon')}"
+    return label
 
-        if i + 1 < len(platforms):
-            p2 = platforms[i + 1]
-            slug2 = p2.get("slug", "")
-            if p2.get("enabled", True):
-                label2 = f"{p2.get('icon', '')} {t(f'engagement_{slug2}')}"
-                row.append((label2, f"engagement:platform:{slug2}"))
-            else:
-                label2 = f"{p2.get('icon', '')} {t(f'engagement_{slug2}')} {t('engagement_coming_soon')}"
-                row.append((label2, f"engagement:coming_soon:{slug2}"))
+
+def build_engagement_platforms_keyboard(t, platforms: list[dict]) -> dict[str, Any]:
+    """Build the platform grid in two columns, including Coming Soon items."""
+    visible = [item for item in platforms if item.get("visible", True)]
+    rows: list[tuple[tuple[str, str], ...]] = []
+    for index in range(0, len(visible), 2):
+        row: list[tuple[str, str]] = []
+        for platform in visible[index:index + 2]:
+            slug = platform.get("slug", "")
+            callback = (
+                f"engagement:platform:{slug}"
+                if platform.get("enabled", True) and not platform.get("coming_soon", False)
+                else f"engagement:coming_soon:{slug}"
+            )
+            row.append((_platform_label(t, platform), callback))
         rows.append(tuple(row))
 
     rows.append(((t("back_tools"), "tools"),))
     return keyboard(*rows)
 
 
-def build_engagement_categories_keyboard(t, categories: list[dict]) -> dict[str, Any]:
-    """Build engagement categories grid (2 columns)."""
-    rows = []
-    for i in range(0, len(categories), 2):
-        row = []
-        c1 = categories[i]
-        label1 = _get_category_label(t, c1)
-        row.append((label1, f"engagement:category:{c1['id']}"))
+def _category_label(t, category: dict) -> str:
+    slug = category.get("slug", "")
+    name = category.get("name", slug)
+    if category.get("platform_slug") == "telegram":
+        if slug == "members":
+            name = t("telegram_members")
+        elif slug == "views":
+            name = t("telegram_views")
+    if not category.get("enabled", True) or category.get("coming_soon", False):
+        name = f"{name} {t('engagement_coming_soon')}"
+    return name
 
-        if i + 1 < len(categories):
-            c2 = categories[i + 1]
-            label2 = _get_category_label(t, c2)
-            row.append((label2, f"engagement:category:{c2['id']}"))
+
+def build_engagement_categories_keyboard(t, categories: list[dict]) -> dict[str, Any]:
+    """Build the category grid.  Disabled categories stay visible as Coming Soon."""
+    rows: list[tuple[tuple[str, str], ...]] = []
+    for index in range(0, len(categories), 2):
+        row: list[tuple[str, str]] = []
+        for category in categories[index:index + 2]:
+            row.append((_category_label(t, category), f"engagement:category:{category['id']}"))
         rows.append(tuple(row))
 
     rows.append(((t("back_engagement"), "tools:engagement"),))
     return keyboard(*rows)
 
 
-def _get_category_label(t, category: dict) -> str:
-    """Get localized label for a category."""
-    slug = category.get("slug", "")
-    if slug == "members":
-        return t("telegram_members")
-    if slug == "views":
-        return t("telegram_views")
-    return category.get("name", slug)
+def sale_price_per_1000(rate_milli: int, markup_percent: int) -> int:
+    """Convert provider cost (milli-VND per 1000) to the Bot Core sale price."""
+    return max(0, int(rate_milli) * (100 + max(0, int(markup_percent))) // 100)
 
 
-def build_member_packages_keyboard(t, packages: list[dict]) -> dict[str, Any]:
-    """Build member packages keyboard (2 columns)."""
-    rows = []
-    for i in range(0, len(packages), 2):
-        if i + 1 < len(packages):
-            rows.append((
-                (packages[i]["button_text"], f"tg_member_select:{packages[i]['service_id']}"),
-                (packages[i + 1]["button_text"], f"tg_member_select:{packages[i + 1]['service_id']}"),
-            ))
-        else:
-            rows.append(((packages[i]["button_text"], f"tg_member_select:{packages[i]['service_id']}"),))
+def build_service_packages_keyboard(
+    t,
+    services: list[dict],
+    *,
+    platform_slug: str,
+    category_slug: str,
+    markup_percent: int,
+    platform_name: str = "",
+) -> dict[str, Any]:
+    """Build package buttons from API service data.
 
-    rows.append(((t("back_telegram"), "engagement:platform:telegram"),))
+    Telegram Member keeps the historical ``tg_member_select:<id>`` callback so
+    old messages continue to work.  Other services use the generic callback.
+    """
+    rows: list[tuple[tuple[str, str], ...]] = []
+    for index in range(0, len(services), 2):
+        row: list[tuple[str, str]] = []
+        for service in services[index:index + 2]:
+            price = sale_price_per_1000(service.get("rate_milli", 0), markup_percent)
+            label = f"{service.get('name', 'Service')} · {price:,} VNĐ/1K"
+            if platform_slug == "telegram" and category_slug == "members":
+                callback = f"tg_member_select:{service['id']}"
+            else:
+                callback = f"engagement:service:{service['id']}"
+            row.append((label, callback))
+        rows.append(tuple(row))
+
+    if platform_slug == "telegram":
+        back_label = t("back_telegram")
+    else:
+        back_label = t("back_to_platform", platform=platform_name or platform_slug)
+    rows.append(((back_label, f"engagement:platform:{platform_slug}"),))
     return keyboard(*rows)
 
 
 def build_cancel_keyboard(t, back_action: str) -> dict[str, Any]:
-    """Build a simple cancel keyboard."""
     return keyboard(((t("cancel"), back_action),))
 
 
 def build_confirm_keyboard(t, confirm_action: str, cancel_action: str) -> dict[str, Any]:
-    """Build confirm/cancel keyboard."""
-    return keyboard(
-        ((t("confirm_pay"), confirm_action), (t("cancel"), cancel_action))
-    )
+    return keyboard(((t("confirm_pay"), confirm_action), (t("cancel"), cancel_action)))
 
 
 def build_back_keyboard(t, back_label: str, back_action: str) -> dict[str, Any]:
-    """Build a simple back button keyboard."""
     return keyboard(((back_label, back_action),))

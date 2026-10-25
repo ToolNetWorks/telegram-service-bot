@@ -25,3 +25,26 @@ class ServicesRepository:
         if price < 0:
             return False
         return self.db.execute("UPDATE services SET price=? WHERE id=?", (price, service_id)).rowcount == 1
+
+    def get_or_create_engagement_service(self, name: str, provider_id: str, provider_service_id: str) -> dict:
+        """Return a local label row for an Engagement API service.
+
+        ``orders.service_id`` is a foreign key into the local ``services`` table
+        (Bot Core owns orders).  The provider service identity itself is stored
+        in ``provider_orders``; this row only provides a stable local label.
+        """
+        title = f"Engagement · {name}"[:120]
+        existing = self.db.fetchone("SELECT * FROM services WHERE title=?", (title,))
+        if existing:
+            return existing
+
+        with self.db.transaction():
+            self.db.execute(
+                "INSERT OR IGNORE INTO services(title, description, price, platform, enabled) "
+                "VALUES (?,?,?,?,?)",
+                (title, f"{provider_id}:{provider_service_id}", 0, "engagement", 1),
+            )
+        row = self.db.fetchone("SELECT * FROM services WHERE title=?", (title,))
+        if row is None:
+            raise RuntimeError("Unable to create local engagement service label")
+        return row

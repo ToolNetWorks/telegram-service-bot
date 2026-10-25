@@ -48,14 +48,15 @@ class BotCore:
         self.deposit_repo = DepositRepository(self.db)
         self.order_repo = OrderRepository(self.db)
         self.services_repo = ServicesRepository(self.db)
-        self.engagement_repo = EngagementRepository(self.db)
         self.settings_repo = SettingsRepository(self.db)
 
         # Initialize state manager
         self.state_manager = StateManager(self.db)
 
-        # Initialize Engagement API client
+        # Engagement catalog and provider calls are owned by the Engagement API.
+        # Bot Core only renders whatever the API returns.
         self.engagement_client = EngagementClient(config)
+        self.engagement_repo = EngagementRepository(self.engagement_client)
 
         # Initialize handlers
         self.handlers = Handlers(

@@ -1,6 +1,11 @@
-"""Message handlers for Bot Core."""
+"""Message and callback handlers for Bot Core.
+
+Telegram UI lives here.  Catalog data is fetched from the Engagement API; no
+provider IDs, provider prices or category lists are hardcoded in this module.
+"""
 from __future__ import annotations
 
+import hashlib
 import html
 import logging
 import re
@@ -9,30 +14,40 @@ import time
 from dataclasses import dataclass
 from typing import Any
 
+from app.clients.engagement import EngagementAPIError, EngagementClient, OrderRequest, OrderResult
 from app.core.config import BotConfig
 from app.core.state import StateManager, States, UserState
 from app.database.connection import Database
 from app.i18n import LANGUAGES, translate
-from app.modules.users.repository import UserRepository
-from app.modules.wallet.repository import WalletRepository
+from app.modules.admin.repository import SettingsRepository
 from app.modules.deposits.repository import DepositRepository
+from app.modules.engagement.repository import EngagementRepository
 from app.modules.orders.repository import OrderRepository
 from app.modules.orders.services_repository import ServicesRepository
-from app.modules.engagement.repository import EngagementRepository
-from app.modules.admin.repository import SettingsRepository
+from app.modules.users.repository import UserRepository
+from app.modules.wallet.repository import WalletRepository
 from app.telegram.keyboards import (
-    build_home_keyboard, build_tools_keyboard, build_engagement_platforms_keyboard,
-    build_engagement_categories_keyboard, build_member_packages_keyboard,
-    build_cancel_keyboard, build_confirm_keyboard, build_back_keyboard,
+    build_back_keyboard,
+    build_cancel_keyboard,
+    build_confirm_keyboard,
+    build_engagement_categories_keyboard,
+    build_engagement_platforms_keyboard,
+    build_home_keyboard,
+    build_service_packages_keyboard,
+    build_tools_keyboard,
+    keyboard,
+    sale_price_per_1000,
 )
-from app.clients.engagement import EngagementClient, OrderRequest
 
 LOG = logging.getLogger("botcore.handlers")
+
+TELEGRAM_LINK_RE = re.compile(r"^(?:https://t\.me/[A-Za-z0-9_+]{3,}|@[A-Za-z0-9_]{3,})$")
 
 
 @dataclass
 class Update:
     """Parsed Telegram update."""
+
     user_id: int
     username: str
     display_name: str
@@ -74,15 +89,15 @@ class Handlers:
         self.state_manager = state_manager
         self.engagement_client = engagement_client
 
-    def handle_update(self, update: Update) -> None:
-        """Route update to appropriate handler."""
-        uid = update.user_id
+    # ------------------------------------------------------------------
+    # Dispatch
+    # ------------------------------------------------------------------
 
-        # Ensure user exists
+    def handle_update(self, update: Update) -> None:
+        uid = update.user_id
         self.user_repo.ensure_user(uid, update.username, update.display_name)
         user = self.user_repo.get_user(uid)
         lang = user["language"] if user and user["language"] else "vi"
-
         t = lambda key, **kw: translate(lang, key, **kw)
 
         if update.is_callback:
@@ -91,16 +106,13 @@ class Handlers:
             self._handle_message(update, uid, lang, t)
 
     def _handle_callback(self, update: Update, uid: int, lang: str, t) -> None:
-        """Handle callback query."""
         data = update.callback_data
         cb_id = update.callback_query_id
-
         if not data or not cb_id:
             return
 
         self.tg.answer_callback_query(cb_id)
 
-        # Language selection
         if data.startswith("lang:"):
             lang_code = data.split(":", 1)[1]
             if lang_code in LANGUAGES:
@@ -108,211 +120,178 @@ class Handlers:
                 self._send_home(uid, lang_code)
             return
 
-        # Main navigation
         if data == "home":
             self._send_home(uid, lang)
             return
-
         if data == "wallet":
             self._show_wallet(uid, lang, t)
             return
-
         if data == "tools":
             self._show_tools(uid, lang, t)
             return
-
         if data == "support":
             self._show_support(uid, lang, t)
             return
-
         if data == "referral":
             self._show_referral(uid, lang, t)
             return
-
         if data == "faq":
             self._show_faq(uid, lang, t)
             return
-
         if data == "changelog":
             self._show_changelog(uid, lang, t)
             return
-
         if data == "orders":
             self._show_orders(uid, lang, t)
             return
-
         if data == "language":
             self._show_language(uid, lang, t)
             return
 
-        # Tools submenu
         if data == "tools:report":
             self._start_report_flow(uid, lang, t)
             return
-
         if data == "tools:engagement":
             self._show_engagement_platforms(uid, lang, t)
             return
-
         if data == "tools:buy":
             self._show_tool_buy(uid, lang, t)
             return
-
         if data == "tools:sub":
             self._show_tool_sub(uid, lang, t)
             return
 
-        # Engagement platforms
+        # Engagement navigation (current and legacy callback formats)
         if data.startswith("engagement:platform:"):
-            platform_slug = data.split(":", 2)[2]
-            self._show_engagement_categories(uid, lang, t, platform_slug)
+            self._show_engagement_categories(uid, lang, t, data.split(":", 2)[2])
             return
-
         if data.startswith("engagement:coming_soon:"):
-            platform_slug = data.split(":", 2)[2]
-            platform = self.engagement_repo.get_platform_by_slug(platform_slug)
-            name = platform["name"] if platform else platform_slug
-            self.tg.send_message(uid, f"🚧 {name} {t('engagement_coming_soon')}")
+            self._show_coming_soon(uid, lang, t, data.split(":", 2)[2])
             return
-
-        # Engagement categories
         if data.startswith("engagement:category:"):
-            cat_id = int(data.split(":", 2)[2])
-            self._show_category_services(uid, lang, t, cat_id)
+            try:
+                category_id = int(data.split(":", 2)[2])
+            except ValueError:
+                self._show_engagement_platforms(uid, lang, t)
+                return
+            self._show_category_services(uid, lang, t, category_id)
+            return
+        if data.startswith("engagement:service:"):
+            try:
+                service_id = int(data.split(":", 2)[2])
+            except ValueError:
+                self._show_engagement_platforms(uid, lang, t)
+                return
+            self._start_engagement_order(uid, lang, t, service_id)
             return
 
-        # Telegram member packages
+        # Historical callbacks from messages sent before the API split.
+        if data in ("engagement:telegram_members", "engagement:telegram_views"):
+            slug = "members" if data.endswith("members") else "views"
+            self._show_category_by_slug(uid, lang, t, "telegram", slug)
+            return
         if data.startswith("tg_member_select:"):
-            svc_id = int(data.split(":", 1)[1])
-            self._show_tg_member_confirm(uid, lang, t, svc_id)
+            try:
+                service_id = int(data.split(":", 1)[1])
+            except ValueError:
+                self._show_engagement_platforms(uid, lang, t)
+                return
+            self._start_engagement_order(uid, lang, t, service_id)
             return
 
+        if data == "engagement:confirm" or data == "tg_member_confirm_pay":
+            self._confirm_engagement_order(uid, lang, t, None)
+            return
         if data.startswith("tg_member_confirm_pay:"):
-            parts = data.split(":")
-            svc_id = int(parts[1])
-            link = parts[2] if len(parts) > 2 else ""
-            qty = int(parts[3]) if len(parts) > 3 else 0
-            self._process_tg_member_order(uid, lang, t, svc_id, link, qty)
+            # Legacy messages embedded service/link/quantity in callback_data.
+            self._confirm_engagement_order(uid, lang, t, data)
             return
 
-        # Deposits
         if data == "deposit":
             self._start_deposit(uid, lang, t)
             return
-
         if data == "cancel_deposit":
             state = self.state_manager.get_state(uid)
             if state.name == States.DEPOSIT_AMOUNT:
                 self.state_manager.clear_state(uid)
                 self._show_wallet(uid, lang, t)
             return
-
-        # Admin
         if data.startswith("admin:"):
             self._handle_admin(uid, lang, t, data)
             return
 
     def _handle_message(self, update: Update, uid: int, lang: str, t) -> None:
-        """Handle text message."""
         text = (update.text or "").strip()
-
-        # Command handling
         if text.startswith("/"):
             self._handle_command(uid, lang, t, text)
             return
 
-        # State-based handling
         state = self.state_manager.get_state(uid)
-
         if state.name == States.CAPTCHA:
             self._handle_captcha(uid, lang, t, text, state)
             return
-
         if state.name == States.DEPOSIT_AMOUNT:
             self._handle_deposit_amount(uid, lang, t, text, state)
             return
-
         if state.name == States.DEPOSIT_PROOF:
             self._handle_deposit_proof(uid, lang, t, text, state)
             return
-
         if state.name == States.SUPPORT:
             self._handle_support_message(uid, lang, t, text)
             return
-
-        if state.name == States.TG_MEMBER_LINK:
-            self._handle_tg_member_link(uid, lang, t, text, state)
+        if state.name in (States.ENGAGEMENT_LINK, States.TG_MEMBER_LINK):
+            self._handle_engagement_link(uid, lang, t, text, state)
+            return
+        if state.name in (States.ENGAGEMENT_QTY, States.TG_MEMBER_QTY):
+            self._handle_engagement_qty(uid, lang, t, text, state)
+            return
+        if state.name in (States.ORDER_TARGET, States.ORDER_REASON, States.ORDER_EVIDENCE):
+            self.state_manager.clear_state(uid)
+            self.tg.send_message(uid, "🚧 Tính năng này đang phát triển.", build_back_keyboard(t, t("back"), "home"))
             return
 
-        if state.name == States.TG_MEMBER_QTY:
-            self._handle_tg_member_qty(uid, lang, t, text, state)
-            return
-
-        # Report flow states
-        if state.name == States.ORDER_TARGET:
-            self._handle_report_target(uid, lang, t, text, state)
-            return
-
-        if state.name == States.ORDER_REASON:
-            self._handle_report_reason(uid, lang, t, text, state)
-            return
-
-        if state.name == States.ORDER_EVIDENCE:
-            self._handle_report_evidence(uid, lang, t, text, state)
-            return
-
-        # Unknown message
         self.tg.send_message(uid, t("home", name=html.escape(update.display_name)), build_home_keyboard(t))
 
     def _handle_command(self, uid: int, lang: str, t, text: str) -> None:
-        """Handle bot commands."""
         cmd = text.split()[0].lower()
-
         if cmd == "/start":
-            if text == "/start":
-                self._start_captcha(uid, lang, t)
-            else:
-                # Deep link referral
+            if text != "/start":
                 ref = text.split(maxsplit=1)[1] if len(text.split()) > 1 else ""
                 if ref.isdigit():
                     ref_id = int(ref)
                     self.user_repo.ensure_user(uid, "", "", ref_id if ref_id != uid else None)
-                self._start_captcha(uid, lang, t)
+            self._start_captcha(uid, lang, t)
             return
-
         if cmd == "/cancel":
             self.state_manager.clear_state(uid)
             self._send_home(uid, lang)
             return
-
         if cmd in ("/help", "/menu"):
             self._send_home(uid, lang)
             return
-
         if cmd == "/wallet":
             self._show_wallet(uid, lang, t)
             return
-
         if cmd == "/orders":
             self._show_orders(uid, lang, t)
             return
-
-        # Admin commands
         if uid in self.config.admin_ids:
             if cmd == "/admin":
                 self._show_admin_panel(uid, lang, t)
                 return
-            if cmd.startswith("/approve "):
+            if cmd == "/approve":
                 self._admin_approve_deposit(uid, lang, t, text)
                 return
-            if cmd.startswith("/reject "):
+            if cmd == "/reject":
                 self._admin_reject_deposit(uid, lang, t, text)
                 return
-            if cmd.startswith("/markup "):
+            if cmd == "/markup":
                 self._admin_set_markup(uid, lang, t, text)
                 return
 
-    # --- Implementation methods ---
+    # ------------------------------------------------------------------
+    # Onboarding / simple menus
+    # ------------------------------------------------------------------
 
     def _start_captcha(self, uid: int, lang: str, t) -> None:
         a = secrets.randbelow(20) + 1
@@ -338,7 +317,11 @@ class Handlers:
                     self.state_manager.set_state(uid, States.CAPTCHA, expires_in=120, a=a, b=b, attempts=attempts)
                     self.tg.send_message(uid, t("captcha_bad", remaining=attempts), build_cancel_keyboard(t, "home"))
         except ValueError:
-            self.tg.send_message(uid, t("captcha_bad", remaining=state.data.get("attempts", 3)), build_cancel_keyboard(t, "home"))
+            self.tg.send_message(
+                uid,
+                t("captcha_bad", remaining=state.data.get("attempts", 3)),
+                build_cancel_keyboard(t, "home"),
+            )
 
     def _send_home(self, uid: int, lang: str) -> None:
         t = lambda key, **kw: translate(lang, key, **kw)
@@ -349,194 +332,737 @@ class Handlers:
     def _show_wallet(self, uid: int, lang: str, t) -> None:
         balance = self.wallet_repo.get_balance(uid)
         text = f"💰 <b>Ví tiền</b>\n\nSố dư: <b>{balance:,} VNĐ</b>"
-        markup = build_cancel_keyboard(t, "home")
-        self.tg.send_message(uid, text, markup)
+        self.tg.send_message(uid, text, build_cancel_keyboard(t, "home"))
 
     def _show_tools(self, uid: int, lang: str, t) -> None:
         self.tg.send_message(uid, t("tool_menu"), build_tools_keyboard(t))
 
+    # ------------------------------------------------------------------
+    # Engagement Services UI (all catalog data comes from the API)
+    # ------------------------------------------------------------------
+
+    def _catalog_unavailable(self, uid: int, t, back_action: str = "tools") -> None:
+        label = t("back_tools") if back_action == "tools" else t("back_engagement")
+        self.tg.send_message(uid, t("engagement_api_unavailable"), build_back_keyboard(t, label, back_action))
+
     def _show_engagement_platforms(self, uid: int, lang: str, t) -> None:
-        platforms = self.engagement_repo.list_platforms()
+        try:
+            platforms = self.engagement_repo.list_platforms()
+        except EngagementAPIError as exc:
+            LOG.warning("Engagement catalog unavailable: %s", exc)
+            self._catalog_unavailable(uid, t, "tools")
+            return
+        if not platforms:
+            self._catalog_unavailable(uid, t, "tools")
+            return
         self.tg.send_message(uid, t("engagement_menu"), build_engagement_platforms_keyboard(t, platforms))
 
+    def _show_coming_soon(self, uid: int, lang: str, t, platform_slug: str) -> None:
+        try:
+            platform = self.engagement_repo.get_platform_by_slug(platform_slug)
+        except EngagementAPIError:
+            platform = None
+        name = platform["name"] if platform else platform_slug
+        self.tg.send_message(
+            uid,
+            f"🚧 <b>{html.escape(name)}</b>\n\n{t('engagement_updating')}",
+            build_back_keyboard(t, t("back_engagement"), "tools:engagement"),
+        )
+
     def _show_engagement_categories(self, uid: int, lang: str, t, platform_slug: str) -> None:
-        platform = self.engagement_repo.get_platform_by_slug(platform_slug)
-        if not platform:
-            self._show_engagement_platforms(uid, lang, t)
+        try:
+            platform = self.engagement_repo.get_platform_by_slug(platform_slug)
+            if not platform:
+                self._show_engagement_platforms(uid, lang, t)
+                return
+            if not platform.get("enabled", True) or platform.get("coming_soon", False):
+                self._show_coming_soon(uid, lang, t, platform_slug)
+                return
+            categories = self.engagement_repo.list_categories(platform_slug)
+        except EngagementAPIError as exc:
+            LOG.warning("Engagement categories unavailable: %s", exc)
+            self._catalog_unavailable(uid, t, "tools:engagement")
             return
 
-        categories = self.engagement_repo.list_categories(platform["id"])
         if not categories:
-            self.tg.send_message(uid, t("engagement_no_services"), build_back_keyboard(t, t("back_engagement"), "tools:engagement"))
+            self.tg.send_message(
+                uid,
+                t("engagement_no_services"),
+                build_back_keyboard(t, t("back_engagement"), "tools:engagement"),
+            )
             return
+        self.tg.send_message(
+            uid,
+            t("engagement_select_category"),
+            build_engagement_categories_keyboard(t, categories),
+        )
 
-        self.tg.send_message(uid, t("engagement_select_category"), build_engagement_categories_keyboard(t, categories))
+    def _show_category_by_slug(self, uid: int, lang: str, t, platform_slug: str, category_slug: str) -> None:
+        try:
+            categories = self.engagement_repo.list_categories(platform_slug)
+        except EngagementAPIError:
+            self._catalog_unavailable(uid, t, "tools:engagement")
+            return
+        category = next((item for item in categories if item.get("slug") == category_slug), None)
+        if category is None:
+            self.tg.send_message(
+                uid,
+                t("engagement_updating"),
+                build_back_keyboard(t, t("back_engagement"), "tools:engagement"),
+            )
+            return
+        self._show_category_services(uid, lang, t, category["id"])
 
     def _show_category_services(self, uid: int, lang: str, t, category_id: int) -> None:
-        category = self.engagement_repo.get_category(category_id)
-        if not category:
-            self._show_engagement_platforms(uid, lang, t)
-            return
-
-        services = self.engagement_repo.list_provider_services(category_id)
-        if not services:
-            self.tg.send_message(uid, t("engagement_no_services"), build_back_keyboard(t, t("back_engagement"), "tools:engagement"))
-            return
-
-        if category["slug"] == "members":
-            packages = []
-            for svc in services:
-                price_per_1000 = svc["rate_milli"]
-                total_per_1000 = price_per_1000 * 2  # 100% markup
-                button_text = f"{svc['name']} - {total_per_1000:,} VNĐ/1K"
-                packages.append({"service_id": svc["id"], "button_text": button_text})
-
-            self.tg.send_message(uid, t("tg_member_select"), build_member_packages_keyboard(t, packages))
-        else:
-            self.tg.send_message(uid, f"🚧 {category['name']} đang phát triển.")
-
-    def _show_tg_member_confirm(self, uid: int, lang: str, t, svc_id: int) -> None:
-        svc = self.engagement_repo.get_provider_service(svc_id)
-        if not svc:
-            self._show_engagement_platforms(uid, lang, t)
-            return
-
-        price_per_1000 = svc["rate_milli"] * 2  # 100% markup
-        text = (f"📦 <b>{html.escape(svc['name'])}</b>\n\n"
-                f"💰 Giá: {price_per_1000:,} VNĐ/1.000 member\n"
-                f"📉 Tối thiểu: {svc['min_quantity']}\n"
-                f"📈 Tối đa: {svc['max_quantity']}\n\n"
-                f"{t('tg_member_enter_link')}")
-
-        self.state_manager.set_state(uid, States.TG_MEMBER_LINK, expires_in=300, svc_id=svc_id)
-        self.tg.send_message(uid, text, build_cancel_keyboard(t, "engagement:platform:telegram"))
-
-    def _handle_tg_member_link(self, uid: int, lang: str, t, text: str, state: UserState) -> None:
-        link = text.strip()
-        if not (link.startswith("https://t.me/") or link.startswith("@")):
-            self.tg.send_message(uid, t("tg_member_invalid_link"), build_cancel_keyboard(t, "engagement:platform:telegram"))
-            return
-
-        svc_id = state.data.get("svc_id")
-        svc = self.engagement_repo.get_provider_service(svc_id)
-        if not svc:
-            self.state_manager.clear_state(uid)
-            self._show_engagement_platforms(uid, lang, t)
-            return
-
-        self.state_manager.set_state(uid, States.TG_MEMBER_QTY, expires_in=300, svc_id=svc_id, link=link)
-        self.tg.send_message(uid, t("tg_member_enter_qty", min_qty=svc["min_quantity"], max_qty=svc["max_quantity"]), build_cancel_keyboard(t, "engagement:platform:telegram"))
-
-    def _handle_tg_member_qty(self, uid: int, lang: str, t, text: str, state: UserState) -> None:
         try:
-            qty = int(text.strip())
-        except ValueError:
-            self.tg.send_message(uid, t("tg_member_qty_invalid_format", min_qty=state.data.get("min_qty", 1), max_qty=state.data.get("max_qty", 1000000)), build_cancel_keyboard(t, "engagement:platform:telegram"))
+            category = self.engagement_repo.get_category(category_id)
+            if not category:
+                self._show_engagement_platforms(uid, lang, t)
+                return
+            platform = self.engagement_repo.get_platform_by_slug(category["platform_slug"])
+            if not platform:
+                self._show_engagement_platforms(uid, lang, t)
+                return
+            if not category.get("enabled", True) or category.get("coming_soon", False):
+                self.tg.send_message(
+                    uid,
+                    t("engagement_updating"),
+                    build_back_keyboard(t, t("back_to_platform", platform=platform["name"]), f"engagement:platform:{platform['slug']}"),
+                )
+                return
+            services = self.engagement_repo.list_provider_services(category_id)
+        except EngagementAPIError as exc:
+            LOG.warning("Engagement services unavailable: %s", exc)
+            self._catalog_unavailable(uid, t, "tools:engagement")
             return
 
-        svc_id = state.data.get("svc_id")
-        link = state.data.get("link")
-        svc = self.engagement_repo.get_provider_service(svc_id)
-        if not svc:
+        if not services:
+            self.tg.send_message(
+                uid,
+                t("engagement_updating"),
+                build_back_keyboard(t, t("back_to_platform", platform=platform["name"]), f"engagement:platform:{platform['slug']}"),
+            )
+            return
+
+        markup = self.settings_repo.get_markup_percent()
+        lines = [t("engagement_choose_package", category=self._category_label(t, category))]
+        for service in services:
+            price = sale_price_per_1000(service.get("rate_milli", 0), markup)
+            lines.append(
+                f"• <b>{html.escape(service.get('name', 'Service'))}</b> — {price:,} VNĐ/1K\n"
+                f"  Min {service.get('min_quantity', 1):,} · Max {service.get('max_quantity', 0):,}"
+            )
+        self.tg.send_message(
+            uid,
+            "\n".join(lines),
+            build_service_packages_keyboard(
+                t,
+                services,
+                platform_slug=platform["slug"],
+                category_slug=category["slug"],
+                markup_percent=markup,
+                platform_name=platform["name"],
+            ),
+        )
+
+    def _category_label(self, t, category: dict) -> str:
+        slug = category.get("slug", "")
+        if category.get("platform_slug") == "telegram":
+            if slug == "members":
+                return t("telegram_members")
+            if slug == "views":
+                return t("telegram_views")
+        return category.get("name", slug)
+
+    def _context_for_service(self, service_id: int) -> dict[str, Any] | None:
+        try:
+            service = self.engagement_repo.get_provider_service(service_id)
+            if not service or service.get("status") != "active":
+                return None
+            category = self.engagement_repo.get_category(service["category_id"])
+            if not category:
+                return None
+            platform = self.engagement_repo.get_platform_by_slug(category["platform_slug"])
+            if not platform:
+                return None
+        except EngagementAPIError as exc:
+            LOG.warning("Cannot load service context: %s", exc)
+            return None
+
+        markup = self.settings_repo.get_markup_percent()
+        return {
+            "service": service,
+            "category": category,
+            "platform": platform,
+            "markup": markup,
+            "sale_price": sale_price_per_1000(service.get("rate_milli", 0), markup),
+        }
+
+    def _start_engagement_order(self, uid: int, lang: str, t, service_id: int) -> None:
+        context = self._context_for_service(service_id)
+        if not context:
+            self.tg.send_message(
+                uid,
+                t("tg_member_unavailable"),
+                build_back_keyboard(t, t("back_engagement"), "tools:engagement"),
+            )
+            return
+
+        category = context["category"]
+        platform = context["platform"]
+        if not category.get("enabled", True) or category.get("coming_soon", False):
+            self.tg.send_message(
+                uid,
+                t("engagement_updating"),
+                build_back_keyboard(t, t("back_to_platform", platform=platform["name"]), f"engagement:platform:{platform['slug']}"),
+            )
+            return
+
+        service = context["service"]
+        link_prompt = (
+            t("tg_member_enter_link")
+            if platform["slug"] == "telegram"
+            else t("engagement_generic_link_prompt")
+        )
+        self.state_manager.set_state(uid, States.ENGAGEMENT_LINK, expires_in=600, **context)
+        self.tg.send_message(
+            uid,
+            t(
+                "engagement_package_details",
+                service_name=html.escape(service.get("name", "Service")),
+                price=context["sale_price"],
+                min_qty=service.get("min_quantity", 1),
+                max_qty=service.get("max_quantity", 0),
+                link_prompt=link_prompt,
+            ),
+            build_cancel_keyboard(t, f"engagement:platform:{platform['slug']}"),
+        )
+
+    def _normalize_pending_context(self, uid: int, data: dict[str, Any]) -> dict[str, Any] | None:
+        if "service" in data and "category" in data and "platform" in data:
+            return data
+        service_id = data.get("svc_id", data.get("service_id"))
+        try:
+            service_id = int(service_id)
+        except (TypeError, ValueError):
+            return None
+        context = self._context_for_service(service_id)
+        if not context:
+            return None
+        if data.get("link"):
+            context["link"] = data["link"]
+        return context
+
+    def _handle_engagement_link(self, uid: int, lang: str, t, text: str, state: UserState) -> None:
+        context = self._normalize_pending_context(uid, state.data)
+        if not context:
             self.state_manager.clear_state(uid)
-            self._show_engagement_platforms(uid, lang, t)
+            self.tg.send_message(
+                uid,
+                t("tg_member_unavailable"),
+                build_back_keyboard(t, t("back_engagement"), "tools:engagement"),
+            )
             return
 
-        if qty < svc["min_quantity"]:
-            self.tg.send_message(uid, t("tg_member_qty_below_min", service_name=svc["name"], quantity=qty, min_qty=svc["min_quantity"], max_qty=svc["max_quantity"]), build_cancel_keyboard(t, "engagement:platform:telegram"))
+        platform = context["platform"]
+        link = text.strip()
+        if platform["slug"] == "telegram":
+            valid = bool(TELEGRAM_LINK_RE.match(link))
+        else:
+            valid = link.startswith("http://") or link.startswith("https://")
+        if not valid:
+            message = t("tg_member_invalid_link") if platform["slug"] == "telegram" else t("engagement_invalid_link")
+            self.tg.send_message(
+                uid,
+                message,
+                build_cancel_keyboard(t, f"engagement:platform:{platform['slug']}"),
+            )
             return
 
-        if qty > svc["max_quantity"]:
-            self.tg.send_message(uid, t("tg_member_qty_above_max", service_name=svc["name"], quantity=qty, min_qty=svc["min_quantity"], max_qty=svc["max_quantity"]), build_cancel_keyboard(t, "engagement:platform:telegram"))
+        service = context["service"]
+        self.state_manager.set_state(
+            uid,
+            States.ENGAGEMENT_QTY,
+            expires_in=600,
+            **{**context, "link": link},
+        )
+        self.tg.send_message(
+            uid,
+            t(
+                "tg_member_enter_qty",
+                min_qty=service.get("min_quantity", 1),
+                max_qty=service.get("max_quantity", 0),
+            ),
+            build_cancel_keyboard(t, f"engagement:platform:{platform['slug']}"),
+        )
+
+    def _handle_engagement_qty(self, uid: int, lang: str, t, text: str, state: UserState) -> None:
+        context = self._normalize_pending_context(uid, state.data)
+        if not context:
+            self.state_manager.clear_state(uid)
+            self.tg.send_message(
+                uid,
+                t("tg_member_unavailable"),
+                build_back_keyboard(t, t("back_engagement"), "tools:engagement"),
+            )
             return
 
-        if qty <= 0:
-            self.tg.send_message(uid, t("tg_member_qty_zero", service_name=svc["name"], min_qty=svc["min_quantity"], max_qty=svc["max_quantity"]), build_cancel_keyboard(t, "engagement:platform:telegram"))
+        service = context["service"]
+        platform = context["platform"]
+        min_qty = int(service.get("min_quantity", 1))
+        max_qty = int(service.get("max_quantity", 0))
+        try:
+            quantity = int(text.strip())
+        except ValueError:
+            self.tg.send_message(
+                uid,
+                t("tg_member_qty_invalid_format", min_qty=min_qty, max_qty=max_qty),
+                build_cancel_keyboard(t, f"engagement:platform:{platform['slug']}"),
+            )
             return
 
-        # Show confirmation
-        price_per_1000 = svc["rate_milli"] * 2
-        total = (price_per_1000 * qty) // 1000
-        text = t("tg_member_qty_valid", service_name=svc["name"], link=link, quantity=qty, total=total)
-        confirm_data = f"tg_member_confirm_pay:{svc_id}:{link}:{qty}"
-        self.tg.send_message(uid, text, build_confirm_keyboard(t, confirm_data, "engagement:platform:telegram"))
+        if quantity <= 0:
+            message = t("tg_member_qty_zero", service_name=service.get("name", ""), min_qty=min_qty, max_qty=max_qty)
+        elif quantity < min_qty:
+            message = t(
+                "tg_member_qty_below_min",
+                service_name=service.get("name", ""),
+                quantity=quantity,
+                min_qty=min_qty,
+                max_qty=max_qty,
+            )
+        elif quantity > max_qty:
+            message = t(
+                "tg_member_qty_above_max",
+                service_name=service.get("name", ""),
+                quantity=quantity,
+                min_qty=min_qty,
+                max_qty=max_qty,
+            )
+        else:
+            message = None
 
-    def _process_tg_member_order(self, uid: int, lang: str, t, svc_id: int, link: str, qty: int) -> None:
-        svc = self.engagement_repo.get_provider_service(svc_id)
-        if not svc:
-            self.tg.send_message(uid, t("tg_member_unavailable"))
+        if message:
+            self.tg.send_message(
+                uid,
+                message,
+                build_cancel_keyboard(t, f"engagement:platform:{platform['slug']}"),
+            )
             return
 
-        price_per_1000 = svc["rate_milli"] * 2
-        total = (price_per_1000 * qty) // 1000
-
-        # Check balance
-        balance = self.wallet_repo.get_balance(uid)
-        if balance < total:
-            self.tg.send_message(uid, t("tg_member_insufficient_balance", need=total, have=balance))
+        link = context.get("link", "")
+        if not link:
+            self.state_manager.clear_state(uid)
+            self.tg.send_message(uid, t("engagement_invalid_link"), build_cancel_keyboard(t, "tools:engagement"))
             return
 
-        # Place order via Engagement API
+        total = int(context["sale_price"]) * quantity // 1000
+        if total <= 0:
+            self.tg.send_message(
+                uid,
+                t("tg_member_qty_invalid_format", min_qty=min_qty, max_qty=max_qty),
+                build_cancel_keyboard(t, f"engagement:platform:{platform['slug']}"),
+            )
+            return
+
+        request_key = f"eng:{uid}:{secrets.token_hex(12)}"
+        confirm_context = {
+            **context,
+            "quantity": quantity,
+            "total": total,
+            "request_key": request_key,
+        }
+        self.state_manager.set_state(uid, States.ENGAGEMENT_CONFIRM, expires_in=300, **confirm_context)
+        self.tg.send_message(
+            uid,
+            t(
+                "engagement_confirm_summary",
+                service_name=html.escape(service.get("name", "Service")),
+                link=html.escape(link),
+                quantity=quantity,
+                total=total,
+            ),
+            build_confirm_keyboard(t, "engagement:confirm", f"engagement:platform:{platform['slug']}"),
+        )
+
+    def _normalize_confirm_context(self, uid: int, data: dict[str, Any], legacy_callback: str | None) -> dict[str, Any] | None:
+        if "service" in data and "quantity" in data and "total" in data:
+            return data
+
+        # Legacy tg_member_confirm_pay:<service>:<link>:<quantity>
+        if legacy_callback and legacy_callback.startswith("tg_member_confirm_pay:"):
+            parts = legacy_callback.split(":")
+            if len(parts) >= 4:
+                try:
+                    service_id = int(parts[1])
+                    quantity = int(parts[-1])
+                    link = ":".join(parts[2:-1])
+                except (TypeError, ValueError):
+                    return None
+                context = self._context_for_service(service_id)
+                if not context:
+                    return None
+                total = int(context["sale_price"]) * quantity // 1000
+                digest = hashlib.sha256(f"{uid}:{service_id}:{link}:{quantity}".encode()).hexdigest()[:32]
+                return {
+                    **context,
+                    "link": link,
+                    "quantity": quantity,
+                    "total": total,
+                    "request_key": f"legacy:{digest}",
+                }
+
+        # Legacy in-flight state from the previous Bot Core version.
+        service_id = data.get("service_id", data.get("svc_id"))
+        quantity = data.get("quantity")
+        link = data.get("link")
+        if service_id is not None and quantity is not None and link:
+            try:
+                service_id = int(service_id)
+                quantity = int(quantity)
+            except (TypeError, ValueError):
+                return None
+            context = self._context_for_service(service_id)
+            if not context:
+                return None
+            total = int(data.get("total") or int(context["sale_price"]) * quantity // 1000)
+            nonce = data.get("nonce") or hashlib.sha256(f"{uid}:{service_id}:{link}:{quantity}".encode()).hexdigest()[:32]
+            return {
+                **context,
+                "link": link,
+                "quantity": quantity,
+                "total": total,
+                "request_key": f"legacy:{nonce}",
+            }
+        return None
+
+    def _confirm_engagement_order(self, uid: int, lang: str, t, legacy_callback: str | None) -> None:
+        try:
+            state = self.state_manager.get_state(uid)
+        except Exception:
+            LOG.exception("Cannot read order state uid=%s", uid)
+            self.tg.send_message(uid, t("tg_member_db_busy"))
+            return
+
+        data: dict[str, Any] = {}
+        if state.name in (States.ENGAGEMENT_CONFIRM, States.TG_MEMBER_CONFIRM):
+            data = state.data
+            try:
+                claimed = self.state_manager.claim_state(uid, state.name)
+            except Exception:
+                LOG.exception("Cannot claim order state uid=%s", uid)
+                self.tg.send_message(uid, t("tg_member_db_busy"))
+                return
+            if not claimed:
+                self.tg.send_message(
+                    uid,
+                    t("tg_member_duplicate"),
+                    build_back_keyboard(t, t("back_engagement"), "tools:engagement"),
+                )
+                return
+        elif legacy_callback is None:
+            # The confirmation was already consumed (double click) or expired.
+            self.tg.send_message(
+                uid,
+                t("tg_member_duplicate"),
+                build_back_keyboard(t, t("back_engagement"), "tools:engagement"),
+            )
+            return
+
+        context = self._normalize_confirm_context(uid, data, legacy_callback)
+        if not context:
+            self.tg.send_message(
+                uid,
+                "Phiên đặt hàng không hợp lệ.",
+                build_back_keyboard(t, t("back_engagement"), "tools:engagement"),
+            )
+            return
+
+        self._place_engagement_order(uid, lang, t, context)
+
+    def _place_engagement_order(self, uid: int, lang: str, t, data: dict[str, Any]) -> None:
+        try:
+            service = data["service"]
+            platform = data["platform"]
+            quantity = int(data["quantity"])
+            link = str(data["link"])
+            total = int(data["total"])
+            sale_price = int(data["sale_price"])
+            markup = int(data.get("markup", 0))
+            request_key = str(data["request_key"])
+            min_qty = int(service.get("min_quantity", 1))
+            max_qty = int(service.get("max_quantity", 0))
+        except (KeyError, TypeError, ValueError):
+            self.tg.send_message(
+                uid,
+                "Phiên đặt hàng không hợp lệ.",
+                build_back_keyboard(t, t("back_engagement"), "tools:engagement"),
+            )
+            return
+
+        if total <= 0 or quantity <= 0 or not link or quantity < min_qty or quantity > max_qty:
+            self.tg.send_message(
+                uid,
+                t("tg_member_unavailable"),
+                build_back_keyboard(t, t("back_engagement"), "tools:engagement"),
+            )
+            return
+
+        try:
+            local_service = self.services_repo.get_or_create_engagement_service(
+                name=service.get("name", "Engagement service"),
+                provider_id=service.get("provider_id", "unknown"),
+                provider_service_id=service.get("provider_service_id", ""),
+            )
+        except Exception:
+            LOG.exception("Cannot create local engagement service label uid=%s", uid)
+            self.tg.send_message(uid, t("tg_member_db_busy"))
+            return
+
+        try:
+            outcome, order = self.order_repo.begin_provider_order(
+                user_id=uid,
+                service_id=local_service["id"],
+                request_key=request_key,
+                subject=link,
+                evidence=f"engagement:{service.get('provider_id')}:{service.get('provider_service_id')};qty={quantity}",
+                amount=total,
+            )
+        except Exception:
+            # The COMMIT may have succeeded even though the response was lost.
+            # Never call the provider after an ambiguous local write: that could
+            # create a second provider order for the same request key.
+            LOG.exception("Lost response while creating order uid=%s", uid)
+            try:
+                order = self.order_repo.find_by_request_key(request_key)
+            except Exception:
+                order = None
+            if order is None:
+                self._notify_admins(
+                    f"⚠️ Lỗi tạo đơn nội bộ cho user <code>{uid}</code>. Chưa gọi provider. Kiểm tra log."
+                )
+                self.tg.send_message(uid, t("tg_member_db_busy"))
+                return
+
+            try:
+                existing_provider_order = self.order_repo.get_provider_order(order["id"])
+            except Exception:
+                existing_provider_order = None
+            if existing_provider_order:
+                self.tg.send_message(
+                    uid,
+                    t("tg_member_duplicate"),
+                    build_back_keyboard(t, t("back_engagement"), "tools:engagement"),
+                )
+                return
+
+            self._hold_for_reconciliation(
+                uid,
+                t,
+                order,
+                data,
+                OrderResult(
+                    success=False,
+                    error="Local order write outcome unknown; provider was not called",
+                    definitive=False,
+                    status="pending_reconciliation",
+                    reconciliation_required=True,
+                ),
+                "Local order write outcome unknown; provider was not called",
+            )
+            return
+
+        if outcome == "duplicate":
+            # A replay normally has a provider order already attached.  If it
+            # does not, the first attempt may have committed the debit without
+            # reaching the provider; keep the charge and reconcile manually.
+            if order and order["status"] == "processing":
+                try:
+                    existing_provider_order = self.order_repo.get_provider_order(order["id"])
+                except Exception:
+                    existing_provider_order = None
+                if not existing_provider_order:
+                    self._hold_for_reconciliation(
+                        uid,
+                        t,
+                        order,
+                        data,
+                        OrderResult(
+                            success=False,
+                            error="Duplicate request before provider confirmation",
+                            definitive=False,
+                            status="pending_reconciliation",
+                            reconciliation_required=True,
+                        ),
+                        "Duplicate request before provider confirmation",
+                    )
+                    return
+            self.tg.send_message(
+                uid,
+                t("tg_member_duplicate"),
+                build_back_keyboard(t, t("back_engagement"), "tools:engagement"),
+            )
+            return
+        if outcome == "insufficient":
+            balance = self.wallet_repo.get_balance(uid)
+            self.tg.send_message(
+                uid,
+                t("tg_member_insufficient_balance", need=total, have=balance),
+                build_cancel_keyboard(t, f"engagement:platform:{platform['slug']}"),
+            )
+            return
+        if outcome != "ok" or not order:
+            self.tg.send_message(
+                uid,
+                "Phiên đặt hàng không hợp lệ.",
+                build_back_keyboard(t, t("back_engagement"), "tools:engagement"),
+            )
+            return
+
         self.tg.send_message(uid, t("tg_member_placing"))
 
-        request = OrderRequest(
-            service_id=svc_id,
-            quantity=qty,
-            link=link,
-            idempotency_key=f"tg_{uid}_{svc_id}_{qty}_{int(time.time())}",
-        )
-        result = self.engagement_client.place_order(request)
+        try:
+            result = self.engagement_client.place_order(
+                OrderRequest(
+                    service_id=int(service["id"]),
+                    quantity=quantity,
+                    link=link,
+                    idempotency_key=request_key,
+                )
+            )
+        except Exception as exc:
+            LOG.exception("Unexpected Engagement API client error uid=%s", uid)
+            result = OrderResult(
+                success=False,
+                error=str(exc),
+                definitive=False,
+                status="pending_reconciliation",
+                reconciliation_required=True,
+            )
 
         if not result.success:
-            if "timeout" in str(result.error).lower():
-                self.tg.send_message(uid, t("tg_member_timeout"))
-            else:
-                self.tg.send_message(uid, t("tg_member_api_error", error=str(result.error)[:200]))
+            self._handle_provider_failure(uid, t, order, data, result)
             return
 
-        # Create local order
-        request_key = f"tg_member_{uid}_{svc_id}_{result.provider_order_id}"
-        status, order = self.order_repo.begin_provider_order(
-            user_id=uid,
-            service_id=svc_id,
-            request_key=request_key,
-            subject=link,
-            evidence=f"qty:{qty}",
-            amount=total,
+        if result.reconciliation_required or result.status == "pending_reconciliation":
+            self._hold_for_reconciliation(uid, t, order, data, result, "Provider outcome is unknown")
+            return
+
+        saved = None
+        for attempt in range(3):
+            try:
+                saved = self.order_repo.attach_provider_order(
+                    order_id=order["id"],
+                    provider_name=service.get("provider_id", "unknown"),
+                    provider_service_id=service.get("provider_service_id", ""),
+                    provider_order_id=result.provider_order_id,
+                    quantity=quantity,
+                    link=link,
+                    unit_price_milli=sale_price,
+                    markup_percent=markup,
+                    api_price_per_1000_milli=int(service.get("rate_milli", 0)),
+                    api_response={
+                        "charge_milli": result.charge_milli,
+                        "status": result.status,
+                        "idempotency_key": request_key,
+                    },
+                )
+                break
+            except Exception:
+                LOG.exception(
+                    "Cannot persist provider order %s for local order #%s (attempt %s)",
+                    result.provider_order_id,
+                    order["id"],
+                    attempt + 1,
+                )
+                if attempt < 2:
+                    time.sleep(0.4 * (attempt + 1))
+
+        if saved is None:
+            self._hold_for_reconciliation(
+                uid,
+                t,
+                order,
+                data,
+                result,
+                f"Provider accepted order {result.provider_order_id} but DB write failed",
+            )
+            return
+
+        self.tg.send_message(
+            uid,
+            t(
+                "tg_member_success",
+                order_id=order["id"],
+                service_name=html.escape(service.get("name", "Service")),
+                link=html.escape(link),
+                quantity=quantity,
+                total=total,
+            ),
+            build_back_keyboard(t, t("back_engagement"), "tools:engagement"),
         )
 
-        if status == "duplicate":
-            self.tg.send_message(uid, t("tg_member_duplicate"))
+    def _handle_provider_failure(self, uid: int, t, order: dict, data: dict, result: OrderResult) -> None:
+        if result.definitive:
+            refunded = None
+            try:
+                refunded = self.order_repo.refund_provider_order(order["id"], reason=result.error or "")
+            except Exception:
+                LOG.exception("Refund failed for order #%s", order["id"])
+                try:
+                    refunded = self.order_repo.get(order["id"])
+                except Exception:
+                    refunded = None
+
+            if refunded is not None and refunded["status"] == "rejected":
+                self.tg.send_message(
+                    uid,
+                    t("tg_member_failed", error=html.escape(str(result.error or "Provider rejected")[:300])),
+                    build_back_keyboard(t, t("back_engagement"), "tools:engagement"),
+                )
+                self._notify_admins(
+                    f"↩️ Provider từ chối đơn <b>#{order['id']}</b> của user <code>{uid}</code>. "
+                    f"Đã hoàn <b>{int(order['amount']):,} VNĐ</b> đúng 1 lần."
+                )
+                return
+
+            self._hold_for_reconciliation(uid, t, order, data, result, "Refund could not be confirmed")
             return
 
-        if status == "insufficient":
-            self.tg.send_message(uid, t("tg_member_insufficient_balance", need=total, have=balance))
-            return
+        self._hold_for_reconciliation(uid, t, order, data, result, result.error or "Provider outcome unknown")
 
-        if status != "ok" or not order:
-            self.tg.send_message(uid, t("tg_member_failed", error="internal error"))
-            return
-
-        # Attach provider order
-        markup = self.settings_repo.get_markup_percent()
-        self.order_repo.attach_provider_order(
-            order_id=order["id"],
-            provider_name="vietnamfb",
-            provider_service_id=svc["provider_service_id"],
-            provider_order_id=result.provider_order_id,
-            quantity=qty,
-            link=link,
-            unit_price_milli=svc["rate_milli"],
-            markup_percent=markup,
-            api_price_per_1000_milli=svc["rate_milli"],
-            api_response={"charge_milli": result.charge_milli, "status": result.status},
+    def _hold_for_reconciliation(self, uid: int, t, order: dict, data: dict, result: OrderResult, reason: str) -> None:
+        try:
+            self.order_repo.mark_pending_reconciliation(order["id"])
+        except Exception:
+            LOG.exception("Cannot mark order #%s pending reconciliation", order["id"])
+        self.tg.send_message(
+            uid,
+            t("tg_member_pending_reconcile", order_id=order["id"]),
+            build_back_keyboard(t, t("back_engagement"), "tools:engagement"),
+        )
+        self._notify_admins(
+            f"⚠️ Đơn <b>#{order['id']}</b> của user <code>{uid}</code> cần đối soát.\n"
+            f"Provider: {html.escape(str(data.get('service', {}).get('provider_id', '')))}\n"
+            f"Số tiền: <b>{int(order['amount']):,} VNĐ</b>\n"
+            f"Lý do: {html.escape(reason[:300])}\n"
+            f"Provider order: {html.escape(str(result.provider_order_id or 'N/A'))}"
         )
 
-        self.tg.send_message(uid, t("tg_member_success", order_id=order["id"], service_name=svc["name"], link=link, quantity=qty, total=total))
+    def _notify_admins(self, text: str) -> None:
+        for admin_id in self.config.admin_ids:
+            try:
+                self.tg.send_message(admin_id, text)
+            except Exception:
+                LOG.exception("Cannot notify admin %s", admin_id)
+
+    # ------------------------------------------------------------------
+    # Deposits, support, referral, orders, language
+    # ------------------------------------------------------------------
 
     def _start_deposit(self, uid: int, lang: str, t) -> None:
         self.state_manager.set_state(uid, States.DEPOSIT_AMOUNT, expires_in=300)
-        text = f"💳 <b>Nạp tiền</b>\n\nNhập số tiền muốn nạp (10.000 - 100.000.000 VNĐ):"
+        text = "💳 <b>Nạp tiền</b>\n\nNhập số tiền muốn nạp (10.000 - 100.000.000 VNĐ):"
         self.tg.send_message(uid, text, build_cancel_keyboard(t, "wallet"))
 
     def _handle_deposit_amount(self, uid: int, lang: str, t, text: str, state: UserState) -> None:
@@ -545,7 +1071,11 @@ class Handlers:
             if not (10000 <= amount <= 100000000):
                 raise ValueError
         except ValueError:
-            self.tg.send_message(uid, t("tg_member_qty_invalid_format", min_qty=10000, max_qty=100000000), build_cancel_keyboard(t, "wallet"))
+            self.tg.send_message(
+                uid,
+                t("tg_member_qty_invalid_format", min_qty=10000, max_qty=100000000),
+                build_cancel_keyboard(t, "wallet"),
+            )
             return
 
         dep = self.deposit_repo.create(uid, amount)
@@ -558,12 +1088,15 @@ class Handlers:
         bank_name = self.config.bank_name
         bank_account = self.config.bank_account
         bank_owner = self.config.bank_owner
-        self.tg.send_message(uid, f"<b>Thông tin chuyển khoản</b>\nNgân hàng: {html.escape(bank_name)}\n"
-                         f"Chủ tài khoản: {html.escape(bank_owner)}\nSTK: <code>{html.escape(bank_account)}</code>\n"
-                         f"Số tiền: <b>{amount:,} VNĐ</b>\n"
-                         f"Nội dung CK: <code>TN{dep['id']}</code>\n\n"
-                         "Sau khi chuyển khoản, gửi <b>ảnh chứng từ hoặc mã giao dịch</b> tại đây. "
-                         "Hệ thống không tự ghi có nếu chưa được đối chiếu tại ngân hàng.")
+        self.tg.send_message(
+            uid,
+            f"<b>Thông tin chuyển khoản</b>\nNgân hàng: {html.escape(bank_name)}\n"
+            f"Chủ tài khoản: {html.escape(bank_owner)}\nSTK: <code>{html.escape(bank_account)}</code>\n"
+            f"Số tiền: <b>{amount:,} VNĐ</b>\n"
+            f"Nội dung CK: <code>TN{dep['id']}</code>\n\n"
+            "Sau khi chuyển khoản, gửi <b>ảnh chứng từ hoặc mã giao dịch</b> tại đây. "
+            "Hệ thống không tự ghi có nếu chưa được đối chiếu tại ngân hàng.",
+        )
 
     def _handle_deposit_proof(self, uid: int, lang: str, t, text: str, state: UserState) -> None:
         deposit_id = state.data.get("deposit_id")
@@ -577,7 +1110,11 @@ class Handlers:
 
     def _show_support(self, uid: int, lang: str, t) -> None:
         self.state_manager.set_state(uid, States.SUPPORT, expires_in=3600)
-        self.tg.send_message(uid, "💬 <b>Hỗ trợ</b>\n\nGửi tin nhắn, ảnh hoặc file mô tả vấn đề. Admin sẽ phản hồi sớm nhất.", build_cancel_keyboard(t, "home"))
+        self.tg.send_message(
+            uid,
+            "💬 <b>Hỗ trợ</b>\n\nGửi tin nhắn, ảnh hoặc file mô tả vấn đề. Admin sẽ phản hồi sớm nhất.",
+            build_cancel_keyboard(t, "home"),
+        )
 
     def _handle_support_message(self, uid: int, lang: str, t, text: str) -> None:
         self.db.execute(
@@ -591,25 +1128,31 @@ class Handlers:
         count = self.user_repo.get_referral_count(uid)
         bot_username = self.tg.username
         link = f"https://t.me/{bot_username}?start={uid}" if bot_username else "N/A"
-        text = (f"🤝 <b>Chương trình giới thiệu</b>\n\n"
-                f"Số người giới thiệu: <b>{count}</b>\n"
-                f"Link giới thiệu: <code>{link}</code>\n\n"
-                f"Chia sẻ link để nhận thưởng khi bạn bè tham gia!")
+        text = (
+            f"🤝 <b>Chương trình giới thiệu</b>\n\n"
+            f"Số người giới thiệu: <b>{count}</b>\n"
+            f"Link giới thiệu: <code>{link}</code>\n\n"
+            f"Chia sẻ link để nhận thưởng khi bạn bè tham gia!"
+        )
         self.tg.send_message(uid, text, build_back_keyboard(t, t("back"), "home"))
 
     def _show_faq(self, uid: int, lang: str, t) -> None:
-        text = ("❓ <b>FAQ</b>\n\n"
-                "1. <b>Cách đặt hàng?</b> Chọn dịch vụ → Nhập link/số lượng → Xác nhận → Thanh toán từ ví.\n"
-                "2. <b>Nạp tiền?</b> Vào Ví tiền → Nạp tiền → Chuyển khoản → Gửi chứng từ.\n"
-                "3. <b>Hoàn tiền?</b> Tự động khi đơn bị từ chối hoặc lỗi provider xác thực.\n"
-                "4. <b>Liên hệ Admin?</b> Dùng mục Hỗ trợ trên menu chính.")
+        text = (
+            "❓ <b>FAQ</b>\n\n"
+            "1. <b>Cách đặt hàng?</b> Chọn dịch vụ → Nhập link/số lượng → Xác nhận → Thanh toán từ ví.\n"
+            "2. <b>Nạp tiền?</b> Vào Ví tiền → Nạp tiền → Chuyển khoản → Gửi chứng từ.\n"
+            "3. <b>Hoàn tiền?</b> Tự động khi đơn bị từ chối hoặc lỗi provider xác thực.\n"
+            "4. <b>Liên hệ Admin?</b> Dùng mục Hỗ trợ trên menu chính."
+        )
         self.tg.send_message(uid, text, build_back_keyboard(t, t("back"), "home"))
 
     def _show_changelog(self, uid: int, lang: str, t) -> None:
-        text = ("📋 <b>Cập nhật gần đây</b>\n\n"
-                "• Tách Engagement API thành service riêng\n"
-                "• Hỗ trợ đa nền tảng: Telegram, YouTube, Twitter, Facebook, Instagram, Shopee\n"
-                "• Cải thiện bảo mật và hiệu suất")
+        text = (
+            "📋 <b>Cập nhật gần đây</b>\n\n"
+            "• Tách Engagement API thành service riêng\n"
+            "• Hỗ trợ đa nền tảng: Telegram, YouTube, Twitter, Facebook, Instagram, Shopee\n"
+            "• Cải thiện bảo mật và hiệu suất"
+        )
         self.tg.send_message(uid, text, build_back_keyboard(t, t("back"), "home"))
 
     def _show_orders(self, uid: int, lang: str, t) -> None:
@@ -618,8 +1161,11 @@ class Handlers:
             text = "📋 <b>Đơn của tôi</b>\n\nChưa có đơn hàng nào."
         else:
             lines = ["📋 <b>Đơn của tôi</b>\n"]
-            for o in orders:
-                lines.append(f"#{o['id']} | {o['service_name']} | {o['amount']:,} VNĐ | {o['status']}")
+            for order in orders:
+                lines.append(
+                    f"#{order['id']} | {html.escape(str(order['service_name'] or ''))} | "
+                    f"{order['amount']:,} VNĐ | {order['status']}"
+                )
             text = "\n".join(lines)
         self.tg.send_message(uid, text, build_back_keyboard(t, t("back"), "home"))
 
@@ -636,34 +1182,26 @@ class Handlers:
         if not services:
             self.tg.send_message(uid, t("tool_sub_none"), build_back_keyboard(t, t("back_tools"), "tools"))
             return
-        text = t("tool_menu")
         rows = []
-        for svc in services:
-            rows.append(((f"{svc['title']} - {svc['price']:,} VNĐ", f"tool_buy:{svc['id']}"),))
+        for service in services:
+            rows.append(((f"{service['title']} - {service['price']:,} VNĐ", f"tool_buy:{service['id']}"),))
         rows.append(((t("back_tools"), "tools"),))
-        self.tg.send_message(uid, text, {"inline_keyboard": rows})
+        self.tg.send_message(uid, t("tool_menu"), {"inline_keyboard": rows})
 
     def _show_tool_sub(self, uid: int, lang: str, t) -> None:
         text = t("tool_sub_title") + "\n\n" + t("tool_sub_none") + "\n\n" + t("tool_sub_note")
         self.tg.send_message(uid, text, build_back_keyboard(t, t("back_tools"), "tools"))
 
     def _start_report_flow(self, uid: int, lang: str, t) -> None:
-        # Show platform selection
-        platforms = self.engagement_repo.list_platforms()
-        self.tg.send_message(uid, t("choose_platform"), build_engagement_platforms_keyboard(t, platforms))
+        self.tg.send_message(
+            uid,
+            "🚧 Tính năng gửi báo cáo đang phát triển.",
+            build_back_keyboard(t, t("back_tools"), "tools"),
+        )
 
-    def _handle_report_target(self, uid: int, lang: str, t, text: str, state: UserState) -> None:
-        # Simplified for now
-        self.state_manager.clear_state(uid)
-        self.tg.send_message(uid, "Tính năng báo cáo đang phát triển.", build_back_keyboard(t, t("back"), "home"))
-
-    def _handle_report_reason(self, uid: int, lang: str, t, text: str, state: UserState) -> None:
-        self.state_manager.clear_state(uid)
-        self.tg.send_message(uid, "Tính năng báo cáo đang phát triển.", build_back_keyboard(t, t("back"), "home"))
-
-    def _handle_report_evidence(self, uid: int, lang: str, t, text: str, state: UserState) -> None:
-        self.state_manager.clear_state(uid)
-        self.tg.send_message(uid, "Tính năng báo cáo đang phát triển.", build_back_keyboard(t, t("back"), "home"))
+    # ------------------------------------------------------------------
+    # Admin
+    # ------------------------------------------------------------------
 
     def _show_admin_panel(self, uid: int, lang: str, t) -> None:
         markup = keyboard(
@@ -678,14 +1216,17 @@ class Handlers:
         if data == "admin:deposits":
             deposits = self.deposit_repo.list_pending_deposits()
             text = "📋 <b>Pending Deposits</b>\n\n"
-            for d in deposits:
-                text += f"#{d['id']} | User: {d['user_id']} | {d['amount']:,} VNĐ | {d['status']}\n"
+            for dep in deposits:
+                text += f"#{dep['id']} | User: {dep['user_id']} | {dep['amount']:,} VNĐ | {dep['status']}\n"
             self.tg.send_message(uid, text, build_back_keyboard(t, "← Admin", "admin:panel"))
         elif data == "admin:orders":
             orders = self.order_repo.list_all_orders()
             text = "📦 <b>All Orders</b>\n\n"
-            for o in orders:
-                text += f"#{o['id']} | User: {o['user_id']} | {o['service_name']} | {o['amount']:,} VNĐ | {o['status']}\n"
+            for order in orders:
+                text += (
+                    f"#{order['id']} | User: {order['user_id']} | "
+                    f"{html.escape(str(order['service_name'] or ''))} | {order['amount']:,} VNĐ | {order['status']}\n"
+                )
             self.tg.send_message(uid, text, build_back_keyboard(t, "← Admin", "admin:panel"))
         elif data == "admin:markup":
             markup = self.settings_repo.get_markup_percent()
@@ -694,7 +1235,10 @@ class Handlers:
             users = self.db.fetchone("SELECT COUNT(*) c FROM users")["c"]
             balance = self.db.fetchone("SELECT SUM(balance) s FROM users")["s"] or 0
             orders = self.db.fetchone("SELECT COUNT(*) c FROM orders")["c"]
-            self.tg.send_message(uid, f"👥 Users: {users}\n💰 Total Balance: {balance:,} VNĐ\n📦 Orders: {orders}")
+            self.tg.send_message(
+                uid,
+                f"👥 Users: {users}\n💰 Total Balance: {balance:,} VNĐ\n📦 Orders: {orders}",
+            )
 
     def _admin_approve_deposit(self, uid: int, lang: str, t, text: str) -> None:
         try:

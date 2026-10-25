@@ -71,6 +71,8 @@ class BotConfig:
         
         # Database: Turso config validation when using turso backend
         db_backend = os.getenv("DB_BACKEND", "").strip().lower() or None
+        if db_backend not in (None, "turso", "sqlite"):
+            raise ValueError("DB_BACKEND must be 'turso' or 'sqlite'")
         if db_backend == "turso":
             turso_url = os.getenv("TURSO_URL", "").strip()
             turso_token = os.getenv("TURSO_TOKEN", "").strip()

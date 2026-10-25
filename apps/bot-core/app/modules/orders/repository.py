@@ -64,6 +64,9 @@ class OrderRepository:
             "JOIN orders o ON o.id=po.order_id WHERE po.order_id=?",
             (order_id,),
         )
+
+    def find_by_request_key(self, request_key: str) -> dict | None:
+        return self.db.fetchone("SELECT * FROM orders WHERE request_key=?", (request_key,))
     
     def pay(self, order_id: int, user_id: int) -> str:
         """Pay for an order from wallet."""
@@ -173,32 +176,50 @@ class OrderRepository:
         evidence: str,
         amount: int,
     ) -> tuple[str, dict | None]:
-        """Atomically create local order and debit wallet for provider order."""
+        """Atomically create local order and debit wallet for provider order.
+
+        Returns ``("duplicate", existing)`` when the request key already exists.
+        A concurrent insert that loses the UNIQUE race is converted into a
+        duplicate result after rollback; callers must not call the provider for
+        a duplicate, because the winning request owns the provider call.
+        """
         if amount <= 0 or not request_key:
             return "invalid", None
-        with self.db.transaction():
-            existing = self.db.fetchone("SELECT * FROM orders WHERE request_key=?", (request_key,))
+        try:
+            with self.db.transaction():
+                existing = self.db.fetchone("SELECT * FROM orders WHERE request_key=?", (request_key,))
+                if existing:
+                    return "duplicate", existing
+
+                cur = self.db.execute(
+                    "UPDATE users SET balance=balance-? WHERE user_id=? AND balance>=?",
+                    (amount, user_id, amount),
+                )
+                if cur.rowcount == 0:
+                    return "insufficient", None
+
+                cur = self.db.execute(
+                    "INSERT INTO orders(user_id, service_id, request_key, subject, evidence_kind, evidence, amount, paid, status, created_at, updated_at) "
+                    "VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+                    (user_id, service_id, request_key, subject, "provider_order", evidence, amount, 1, "processing", self.db.utcnow(), self.db.utcnow()),
+                )
+                order_id = cur.lastrowid
+                self.db.execute(
+                    "INSERT INTO ledger(user_id, delta, kind, reference, created_at) VALUES (?,?,?,?,?)",
+                    (user_id, -amount, "provider_payment", f"order:{order_id}", self.db.utcnow()),
+                )
+                return "ok", self.db.fetchone("SELECT * FROM orders WHERE id=?", (order_id,))
+        except Exception:
+            # The transaction may have lost the request_key race, or the COMMIT
+            # response may have been lost.  Never guess: if the order exists,
+            # report a duplicate so the caller does not call the provider twice.
+            try:
+                existing = self.db.fetchone("SELECT * FROM orders WHERE request_key=?", (request_key,))
+            except Exception:
+                existing = None
             if existing:
                 return "duplicate", existing
-            
-            cur = self.db.execute(
-                "UPDATE users SET balance=balance-? WHERE user_id=? AND balance>=?",
-                (amount, user_id, amount),
-            )
-            if cur.rowcount == 0:
-                return "insufficient", None
-            
-            cur = self.db.execute(
-                "INSERT INTO orders(user_id, service_id, request_key, subject, evidence_kind, evidence, amount, paid, status, created_at, updated_at) "
-                "VALUES (?,?,?,?,?,?,?,?,?,?,?)",
-                (user_id, service_id, request_key, subject, "provider_order", evidence, amount, 1, "processing", self.db.utcnow(), self.db.utcnow()),
-            )
-            order_id = cur.lastrowid
-            self.db.execute(
-                "INSERT INTO ledger(user_id, delta, kind, reference, created_at) VALUES (?,?,?,?,?)",
-                (user_id, -amount, "provider_payment", f"order:{order_id}", self.db.utcnow()),
-            )
-            return "ok", self.db.fetchone("SELECT * FROM orders WHERE id=?", (order_id,))
+            raise
     
     def attach_provider_order(
         self,
@@ -229,10 +250,76 @@ class OrderRepository:
             return cur.lastrowid
     
     def mark_pending_reconciliation(self, order_id: int) -> bool:
-        """Mark order as pending reconciliation."""
+        """Keep the debit and flag the order for manual/provider reconciliation."""
         with self.db.transaction():
             cur = self.db.execute(
-                "UPDATE orders SET status='pending_reconciliation', updated_at=? WHERE id=? AND status NOT IN ('rejected','completed')",
+                "UPDATE orders SET status='pending_reconciliation', updated_at=? "
+                "WHERE id=? AND status NOT IN ('rejected','completed')",
                 (self.db.utcnow(), order_id),
             )
             return cur.rowcount == 1
+
+    def refund_provider_order(self, order_id: int, reason: str = "") -> dict | None:
+        """Reject a provider order and refund exactly once.
+
+        The status transition and the wallet credit happen in one transaction.
+        The ledger's UNIQUE(kind, reference) is the final double-refund guard.
+        """
+        with self.db.transaction():
+            order = self.get(order_id)
+            if not order:
+                return None
+            if order["status"] in ("rejected", "completed"):
+                return order
+
+            cur = self.db.execute(
+                "UPDATE orders SET status='rejected', updated_at=? "
+                "WHERE id=? AND status NOT IN ('rejected','completed')",
+                (self.db.utcnow(), order_id),
+            )
+            if cur.rowcount == 0:
+                return self.get(order_id)
+
+            if order["paid"]:
+                already = self.db.fetchone(
+                    "SELECT 1 FROM ledger WHERE kind='order_refund' AND reference=?",
+                    (str(order_id),),
+                )
+                if not already:
+                    self.db.execute(
+                        "UPDATE users SET balance=balance+? WHERE user_id=?",
+                        (order["amount"], order["user_id"]),
+                    )
+                    self.db.execute(
+                        "INSERT INTO ledger(user_id, delta, kind, reference, created_at) "
+                        "VALUES (?,?,?,?,?)",
+                        (order["user_id"], order["amount"], "order_refund", str(order_id), self.db.utcnow()),
+                    )
+            return self.get(order_id)
+
+    def update_provider_order_status(
+        self,
+        provider_name: str,
+        provider_order_id: str,
+        status: str,
+        api_response: dict | None = None,
+    ) -> None:
+        """Update a provider order and mirror the status to the local order."""
+        import json
+
+        with self.db.transaction():
+            row = self.db.fetchone(
+                "SELECT * FROM provider_orders WHERE provider_name=? AND provider_order_id=?",
+                (provider_name, provider_order_id),
+            )
+            if not row:
+                return
+            self.db.execute(
+                "UPDATE provider_orders SET status=?, api_response=?, updated_at=? "
+                "WHERE provider_name=? AND provider_order_id=?",
+                (status, json.dumps(api_response or {}, ensure_ascii=False), self.db.utcnow(), provider_name, provider_order_id),
+            )
+            self.db.execute(
+                "UPDATE orders SET status=?, updated_at=? WHERE id=?",
+                (status, self.db.utcnow(), row["order_id"]),
+            )

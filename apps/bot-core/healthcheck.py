@@ -24,7 +24,12 @@ def main() -> int:
     # Check database connectivity
     url = os.getenv("TURSO_URL", "").strip()
     token = os.getenv("TURSO_TOKEN", "").strip()
-    force_sqlite = os.getenv("DB_BACKEND", "").strip().lower() == "sqlite"
+    backend = os.getenv("DB_BACKEND", "").strip().lower()
+    force_sqlite = backend == "sqlite"
+
+    if backend == "turso" and (not url or not token):
+        print("FAIL: DB_BACKEND=turso requires TURSO_URL and TURSO_TOKEN")
+        return 1
 
     if (url or token) and not force_sqlite:
         if not url or not token:

@@ -19,8 +19,9 @@ WORKDIR /app
 COPY apps/bot-core/requirements.txt /app/requirements.txt
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Copy application code
+# Copy application code and the shared Turso transport
 COPY apps/bot-core/ /app/
+COPY turso_client.py /app/turso_client.py
 COPY assets/ /app/assets/
 
 # Create data directory for SQLite (if used)

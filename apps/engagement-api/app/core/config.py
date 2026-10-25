@@ -1,9 +1,12 @@
-"""Configuration for Engagement API."""
+"""Configuration for the stateless Engagement API.
+
+The Engagement API owns provider integration and the service catalog.  It does
+**not** own financial data and must not receive a Turso token.  Durable order
+and idempotency state belongs to Bot Core (see docs/engagement-api-contract.md).
+"""
 from __future__ import annotations
 
-import os
-from pathlib import Path
-from pydantic import Field
+from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -18,41 +21,63 @@ class Settings(BaseSettings):
     )
 
     # Service
+    environment: str = "production"
     host: str = "0.0.0.0"
     port: int = 8000
-    environment: str = "production"
 
-    # Internal authentication
+    # Internal authentication (required)
     internal_token: str = Field(..., alias="ENGAGEMENT_INTERNAL_TOKEN")
 
-    # Database
-    database_url: str = Field(..., alias="DATABASE_URL")
-    database_token: str = Field(default="", alias="DATABASE_TOKEN")
+    # Provider APIs (required in production)
+    vietnamfb_api_key: str = Field(default="", alias="VIETNAMFB_API_KEY")
+    vietnamfb_base_url: str = Field(
+        default="https://vietnamfb.com",
+        alias="VIETNAMFB_BASE_URL",
+    )
 
-    # Provider APIs
-    vietnamfb_api_key: str = Field(..., alias="VIETNAMFB_API_KEY")
-    vietnamfb_base_url: str = Field(default="https://vietnamfb.com", alias="VIETNAMFB_BASE_URL")
+    # Provider transport
+    request_timeout: float = 20.0
+    connect_timeout: float = 5.0
+    max_retries: int = 2
+    provider_cache_ttl: int = 300
 
     # Security
-    request_timeout: int = 30
-    max_retries: int = 3
-    rate_limit_requests: int = 100
+    rate_limit_requests: int = 120
     rate_limit_window: int = 60
 
     # Logging
     log_level: str = "INFO"
 
+    @field_validator("internal_token")
+    @classmethod
+    def validate_internal_token(cls, value: str) -> str:
+        token = (value or "").strip()
+        if not token:
+            raise ValueError("ENGAGEMENT_INTERNAL_TOKEN must be set")
+        return token
+
+    @field_validator("vietnamfb_api_key")
+    @classmethod
+    def normalize_provider_key(cls, value: str) -> str:
+        return (value or "").strip()
+
+    @field_validator("environment")
+    @classmethod
+    def normalize_environment(cls, value: str) -> str:
+        return (value or "production").strip().lower()
+
+    @property
+    def is_production(self) -> bool:
+        return self.environment in {"production", "prod"}
+
+    @property
+    def provider_configured(self) -> bool:
+        return bool(self.vietnamfb_api_key)
+
 
 settings = Settings()
 
-# Load .env file if exists
-env_path = Path(".env")
-if env_path.exists():
-    for line in env_path.read_text(encoding="utf-8").splitlines():
-        line = line.strip()
-        if not line or line.startswith("#") or "=" not in line:
-            continue
-        name, value = line.split("=", 1)
-        name = name.strip()
-        if name.isupper() and name.replace("_", "").isalnum():
-            os.environ.setdefault(name, value.strip().strip('"').strip("'"))
+# Fail fast in production: without a provider key the API must not pretend to
+# sell services.  Local/test environments may use a mock provider.
+if settings.is_production and not settings.provider_configured:
+    raise RuntimeError("VIETNAMFB_API_KEY must be set in production")

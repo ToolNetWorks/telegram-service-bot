@@ -1,95 +1,120 @@
 # ToolNet Telegram Service Bot — Monorepo
 
-Modular monorepo for ToolNet services with two independent Northflank services:
+Modular monorepo with two independently deployable Northflank services:
 
-- **Bot Core** (`apps/bot-core/`) — Telegram Bot API, user management, wallet, orders, admin
-- **Engagement API** (`apps/engagement-api/`) — FastAPI service for multi-platform engagement services
+- **Bot Core** (`apps/bot-core/`) — Telegram Bot API, users, wallet, orders, payments, admin, Turso.
+- **Engagement API** (`apps/engagement-api/`) — stateless FastAPI catalog and provider integration.
+
+The services communicate only through an authenticated internal HTTP API. Bot Core never
+contains provider credentials, provider service IDs, provider cost prices or a hardcoded
+engagement catalog.
 
 ## Architecture
 
 ```
+Telegram
+   |
+   v
+Bot Core (Northflank worker, 1 replica)
+   |-- Turso (users, wallets, orders, ledger, deposits, referrals, settings)
+   |
+   +--> Engagement API (internal HTTP, token protected)
+             |
+             +--> VietnamFB SMM panel (provider orders/status)
+```
+
+```
 telegram-service-bot/
 ├── apps/
-│   ├── bot-core/              # Northflank Service 1: Telegram Bot
+│   ├── bot-core/                  # Northflank Service 1: Telegram bot
 │   │   ├── app/
-│   │   │   ├── core/          # Config, logging, Telegram client, state
-│   │   │   ├── telegram/      # Handlers, keyboards, callbacks
-│   │   │   ├── modules/       # Domain modules (users, wallet, orders, etc.)
-│   │   │   ├── database/      # Connection, migrations, repositories
-│   │   │   ├── clients/       # External API clients (Engagement API)
-│   │   │   └── i18n/          # Translations
-│   │   ├── bot.py             # Entry point
+│   │   │   ├── core/              # Config, logging, Telegram client, state
+│   │   │   ├── telegram/          # Handlers, keyboards, callbacks
+│   │   │   ├── modules/           # Users, wallet, orders, deposits, admin
+│   │   │   ├── database/          # Turso/SQLite connection and migrations
+│   │   │   ├── clients/           # Engagement API client
+│   │   │   └── i18n/              # Translations
+│   │   ├── tests/                 # UI, order-safety and API integration tests
+│   │   ├── bot.py                 # Entry point
 │   │   ├── Dockerfile
 │   │   ├── requirements.txt
 │   │   └── healthcheck.py
 │   │
-│   └── engagement-api/        # Northflank Service 2: FastAPI
+│   └── engagement-api/            # Northflank Service 2: stateless FastAPI
 │       ├── app/
-│       │   ├── api/           # FastAPI routes
-│       │   ├── core/          # Config, database
-│       │   ├── platforms/     # Platform-specific logic
-│       │   ├── providers/     # Provider integrations (VietnamFB)
-│       │   ├── services/      # Business logic
-│       │   └── schemas/       # Pydantic models
-│       ├── main.py            # Entry point
+│       │   ├── api/routes/        # Health, catalog and order endpoints
+│       │   ├── catalog/           # Code-owned platform/category/service allow-list
+│       │   ├── core/              # Config, auth, rate limit, logging, runtime
+│       │   ├── providers/         # Provider abstraction and VietnamFB client
+│       │   ├── services/          # Catalog merge and order orchestration
+│       │   ├── schemas/           # Pydantic v2 request/response models
+│       │   └── main.py            # FastAPI entry point
+│       ├── tests/                 # Contract, safety and provider tests
 │       ├── Dockerfile
-│       └── requirements.txt
+│       ├── requirements.txt
+│       └── .env.example
 │
-├── packages/
-│   └── contracts/             # Shared types & API contracts
-│
-├── database/
-│   └── migrations/            # SQL migrations
-│
-├── assets/                    # Images, GIFs
-├── tests/                     # Shared tests
-├── scripts/                   # Deployment scripts
-├── docs/                      # Documentation
+├── packages/contracts/            # Shared API types/documentation
+├── database/migrations/           # Legacy SQL migrations (Bot Core uses Python migrations)
+├── assets/                        # Images, GIFs
+├── tests/                         # Legacy root-bot regression tests
+├── docs/                          # Deployment, environment and API contract docs
 └── README.md
 ```
 
 ## Services
 
 ### Bot Core (Northflank 1)
-- **Runtime**: Python 3.12, stdlib only (no external deps)
-- **Protocol**: Telegram Long Polling
-- **Database**: Turso (libSQL) or SQLite
-- **Responsibilities**:
-  - Telegram Bot API (messages, callbacks, inline keyboards)
-  - User management, CAPTCHA, i18n
-  - Wallet & deposits (manual verification)
-  - Orders & financial transactions (idempotent, atomic)
-  - Admin panel
-  - Referral system
-  - Calls Engagement API via internal HTTP
+- **Runtime**: Python 3.12, standard library only.
+- **Protocol**: Telegram long polling.
+- **Database**: Turso (libSQL) in production; SQLite only for local development/tests.
+- **Owns**: users, wallet, deposits, ledger, orders, payments, referrals, subscriptions,
+  admin, banking configuration and audit logs.
+- **Engagement behavior**:
+  - Fetches all platforms, categories and provider services from the Engagement API.
+  - Applies the Bot Core markup to provider cost before showing a sale price.
+  - Creates the local order and debits the wallet atomically **before** calling the provider.
+  - Stores durable idempotency in `orders.request_key` and provider confirmation in
+    `provider_orders`.
+  - Refunds exactly once on a definitive provider rejection.
+  - Keeps the charge and marks `pending_reconciliation` when the provider outcome is unknown.
 
 ### Engagement API (Northflank 2)
-- **Runtime**: Python 3.12, FastAPI + Pydantic v2 + HTTPX
-- **Protocol**: HTTP/JSON (internal only)
-- **Database**: Turso (libSQL) or SQLite
-- **Responsibilities**:
-  - Platform & category catalog
-  - Provider service management
-  - Order placement via SMM panels (VietnamFB)
-  - Order status tracking
-  - Reconciliation
-  - Rate limiting, idempotency, correlation IDs
+- **Runtime**: Python 3.12, FastAPI + Pydantic v2 + HTTPX.
+- **Protocol**: HTTP/JSON on the private network, protected by `ENGAGEMENT_INTERNAL_TOKEN`.
+- **Database**: **none**. The service is stateless; it must not receive `TURSO_URL`,
+  `TURSO_TOKEN`, `DATABASE_URL` or `DATABASE_TOKEN`.
+- **Owns**:
+  - Code-owned platform/category metadata and the real-provider service allow-list.
+  - Live provider catalog synchronization.
+  - Provider order placement and order-status lookup.
+  - Provider error classification (definitive vs ambiguous).
+  - Correlation IDs and in-flight duplicate protection.
+- **Does not own**: customer data, wallets, payments, durable orders, idempotency records or
+  refunds. Those stay in Bot Core.
 
 ## Deployment
 
 ### Northflank Service 1: `toolnet-bot-core`
 - **Dockerfile**: `apps/bot-core/Dockerfile`
-- **Build Context**: Repository root (`/`)
-- **Instances**: 1 (long polling)
-- **Ports**: None (worker)
-- **Environment**: See `.env.example`
+- **Build context**: repository root (`/`)
+- **Instances**: 1 (long polling; never scale above 1)
+- **Ports**: none (worker)
+- **Environment**: see `apps/bot-core/.env.example`
+- **Required integration env**: `ENGAGEMENT_API_URL`, `ENGAGEMENT_API_TOKEN`
 
 ### Northflank Service 2: `toolnet-engagement`
 - **Dockerfile**: `apps/engagement-api/Dockerfile`
-- **Build Context**: Repository root (`/`)
-- **Instances**: 1+
-- **Port**: 8000 (internal)
-- **Environment**: See `.env.example`
+- **Build context**: repository root (`/`)
+- **Instances**: 1+ (stateless)
+- **Port**: 8000 (internal/private)
+- **Environment**: see `apps/engagement-api/.env.example`
+- **Required env**: `ENVIRONMENT`, `ENGAGEMENT_INTERNAL_TOKEN`, `VIETNAMFB_API_KEY`
+- **Never add**: `TURSO_URL`, `TURSO_TOKEN`, `BOT_TOKEN`, `ADMIN_IDS`
+
+`ENGAGEMENT_API_TOKEN` in Bot Core must equal `ENGAGEMENT_INTERNAL_TOKEN` in the
+Engagement API. Use the internal service hostname, for example
+`http://toolnet-engagement:8000`.
 
 ## Development
 
@@ -98,18 +123,14 @@ telegram-service-bot/
 cd apps/bot-core && pip install -r requirements.txt
 cd apps/engagement-api && pip install -r requirements.txt
 
-# Run Bot Core locally
+# Run Bot Core locally (requires a test bot token)
 cd apps/bot-core && python3 bot.py
 
-# Run Engagement API locally
-cd apps/engagement-api && python3 app/main.py
-
-# Run tests
-python3 -m pytest tests/ -v
-
-# Docker build
-docker build -t toolnet-bot-core -f apps/bot-core/Dockerfile .
-docker build -t toolnet-engagement -f apps/engagement-api/Dockerfile .
+# Run Engagement API locally (use a mock/test provider key outside production)
+cd apps/engagement-api && ENVIRONMENT=development \
+  ENGAGEMENT_INTERNAL_TOKEN=dev-token \
+  VIETNAMFB_API_KEY=dev-key \
+  python3 -m app.main
 ```
 
 ## Environment Variables
@@ -118,53 +139,79 @@ docker build -t toolnet-engagement -f apps/engagement-api/Dockerfile .
 | Variable | Required | Description |
 |----------|----------|-------------|
 | `BOT_TOKEN` | Yes | Telegram Bot Token from @BotFather |
-| `ADMIN_IDS` | Yes | Comma-separated admin user IDs |
+| `ADMIN_IDS` | Yes | Comma-separated admin Telegram user IDs |
 | `BOT_NAME` | No | Bot display name |
 | `SUPPORT_USERNAME` | No | Support username (without @) |
-| `DB_PATH` | No | SQLite path (default: `./data/bot.sqlite3`) |
-| `DB_BACKEND` | No | `sqlite` or `turso` |
+| `DB_BACKEND` | Production | `turso` in production; `sqlite` for local tests |
 | `TURSO_URL` | Turso only | Turso database URL |
 | `TURSO_TOKEN` | Turso only | Turso auth token |
-| `BANK_NAME` | Deposits | Bank name for deposits |
+| `DB_PATH` | No | SQLite path for local development |
+| `BANK_NAME` | Deposits | Bank name for manual deposits |
 | `BANK_ACCOUNT` | Deposits | Bank account number |
 | `BANK_OWNER` | Deposits | Bank account owner |
-| `ENGAGEMENT_API_URL` | Yes | Engagement API base URL |
-| `ENGAGEMENT_API_TOKEN` | Yes | Internal API token |
+| `ENGAGEMENT_API_URL` | Yes | Engagement API base URL (internal) |
+| `ENGAGEMENT_API_TOKEN` | Yes | Internal API token (must match API) |
 | `LOG_LEVEL` | No | Logging level (default: INFO) |
+
+Bot Core must **not** receive `VIETNAMFB_API_KEY` or `VIETNAMFB_BASE_URL`.
 
 ### Engagement API
 | Variable | Required | Description |
 |----------|----------|-------------|
-| `ENGAGEMENT_INTERNAL_TOKEN` | Yes | Internal auth token (shared with Bot Core) |
-| `DATABASE_URL` | Turso only | Turso database URL |
-| `DATABASE_TOKEN` | Turso only | Turso auth token |
-| `VIETNAMFB_API_KEY` | Yes | VietnamFB SMM Panel API key |
-| `VIETNAMFB_BASE_URL` | No | VietnamFB base URL |
-| `HOST` | No | Bind host (default: 0.0.0.0) |
-| `PORT` | No | Bind port (default: 8000) |
+| `ENVIRONMENT` | Yes | `production` (fails fast without a provider key) or `test`/`development` |
+| `ENGAGEMENT_INTERNAL_TOKEN` | Yes | Internal auth token (must match Bot Core) |
+| `VIETNAMFB_API_KEY` | Production | VietnamFB SMM Panel API key |
+| `VIETNAMFB_BASE_URL` | No | VietnamFB base URL (default `https://vietnamfb.com`) |
+| `HOST` | No | Bind host (default `0.0.0.0`) |
+| `PORT` | No | Bind port (default `8000`) |
 | `LOG_LEVEL` | No | Logging level |
+
+The Engagement API must **not** receive Turso/database credentials.
+
+## Northflank Networking
+
+**Same project (recommended)**: Both services in same Northflank project → private DNS works.
+- Bot Core: `ENGAGEMENT_API_URL=http://toolnet-engagement:8000`
+- Engagement API: **no public port**, internal only.
+
+**Different projects/teams**: Private DNS **does not work** across projects.
+- Engagement API: enable **Public Port 8000** → gets `https://<service>-<project>.northflank.app` with TLS.
+- Bot Core: `ENGAGEMENT_API_URL=https://<engagement-service>-<project>.northflank.app`
+- Auth: `X-Internal-Token` header (shared secret) validates every request.
 
 ## Security
 
-- All secrets in Northflank environment variables (not in repo)
-- `.gitignore` excludes `.env`, `backups/`, `data/`, `*.sqlite3*`
-- `.dockerignore` excludes secrets, backups, git, docs
-- Internal API uses shared token + correlation IDs
-- No provider credentials exposed to Bot Core
-- Database uses WAL mode, foreign keys, busy timeout
+- All secrets live in Northflank environment variables, never in the repository.
+- `.gitignore` excludes `.env`, `backups/`, `data/`, `*.sqlite3*`.
+- `.dockerignore` excludes secrets, backups, git data and tests.
+- The internal API uses a shared token, correlation IDs and a small rate limiter.
+- Provider credentials and provider-specific rules exist only in the Engagement API.
+- Turso credentials and all financial state exist only in Bot Core.
+- SQLite is never used as a silent production fallback when `DB_BACKEND=turso`.
 
 ## Testing
 
 ```bash
-# Unit tests
-python3 -m pytest tests/ -v
+# Bot Core: UI, order safety, and real client -> real API -> mock VietnamFB
+cd apps/bot-core && python3 -m pytest tests -q
 
-# Docker smoke test
-./docker-smoke-test.sh
+# Engagement API: contract, auth, catalog and provider classification
+cd apps/engagement-api && ENVIRONMENT=test \
+  ENGAGEMENT_INTERNAL_TOKEN=test_token python3 -m pytest tests -q
 
-# Integration test (requires running services)
-python3 -m pytest tests/integration/ -v
+# Legacy root bot regression tests
+python3 -m pytest tests -q
+
+# Docker builds
+docker build -t toolnet-bot-core -f apps/bot-core/Dockerfile .
+docker build -t toolnet-engagement -f apps/engagement-api/Dockerfile .
 ```
+
+The integration test starts a local mock VietnamFB HTTP server and the Engagement API
+as a subprocess. It never places a real provider order.
+
+See `docs/engagement-api-contract.md` for the HTTP contract and
+`docs/env-configuration.md` for the full environment matrix.
 
 ## License
 
